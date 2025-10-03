@@ -150,9 +150,6 @@ If PEMD contributes to your research, please cite:
 
 (An updated citation with DOI will be provided upon publication.)
 
-## License
-PEMD is distributed under the terms of the [MIT License](https://opensource.org/licenses/MIT). By contributing, you agree that your contributions will be licensed under the same terms.
-
 ## Contact
 For questions, feature requests, or collaboration opportunities, please contact the PEMD development team at [tsd23@mails.tsinghua.edu.cn].
 
