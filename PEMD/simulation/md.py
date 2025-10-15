@@ -56,6 +56,7 @@ def relax_poly_chain(
 
     gmx.commands_pdbtogro(
         pdb_file,
+        box_length = 10,
     ).run_local()
 
     gmx.commands_em(

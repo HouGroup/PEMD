@@ -14,6 +14,7 @@ from typing import List, Dict, Any
 import PEMD.core.output_lib as lib
 from dataclasses import dataclass, field
 
+from PEMD.simulation.uma import uma
 from PEMD.simulation.qm import (
     gen_conf_rdkit,
     conf_xtb,
@@ -76,15 +77,55 @@ class QMRun:
 
 
     @staticmethod
+    def uma(
+        work_dir: Path | str,
+        xyz_file: str,
+        *,
+        charge: float = 0,
+        mult: int = 1,
+        model_name: str = "uma-m-1p1",
+        task_name: str = "omol",
+        max_steps: int = 500,
+        fmax: float = 0.03,
+        device: str | None = None,
+        opt_log: bool = False,
+        use_local_uma: bool = False,
+        local_checkpoint: Path | str | None = None,
+        hf_cache_dir: Path | str | None = None,
+        hf_offline: bool = False,
+        top_n_uma: int = 8,
+    ):
+        lib.print_input('UMA Geometry Optimization')
+        return uma(
+            work_dir,
+            xyz_file,
+            top_n_uma=top_n_uma,
+            charge=charge,
+            mult=mult,
+            model_name=model_name,
+            task_name=task_name,
+            max_steps=max_steps,
+            fmax=fmax,
+            device=device,
+            opt_log=opt_log,
+            use_local_uma=use_local_uma,
+            local_checkpoint=local_checkpoint,
+            hf_cache_dir=hf_cache_dir,
+            hf_offline=hf_offline,
+        )
+
+
+    @staticmethod
     def conformer_search(
         work_dir: Path | str,
         *,
         smiles: str | None = None,
         pdb_file: str | None = None,
-        max_conformers: int = 1000,
-        top_n_MMFF: int = 100,
-        top_n_xtb: int = 8,
-        top_n_qm: int = 4,
+        max_conformers: int | None = None,
+        top_n_MMFF: int | None = None,
+        top_n_uma: int | None = None,
+        top_n_xtb: int | None = None,
+        top_n_qm: int | None = None,
         charge: float = 0,
         mult: int = 1,
         gfn: str = 'gfn2',
@@ -93,6 +134,12 @@ class QMRun:
         epsilon: float = 2.0,
         core: int = 32,
         memory: str = '64GB',
+        max_steps_uma: int = 2000,
+        fmax_uma: float = 0.0025,
+        use_local_uma: bool = False,
+        local_checkpoint: Path | str | None = None,
+        hf_cache_dir: Path | str | None = None,
+        hf_offline: bool = False,
     ):
         lib.print_input('Conformer Search')
 
@@ -105,21 +152,43 @@ class QMRun:
             pdb_file=pdb_file,
         )
 
+        xyz_file_xtb_uma = None
         # Optimize conformers using XTB
-        xyz_file_xtb = conf_xtb(
-            work_dir,
-            xyz_file_MMFF,
-            top_n_xtb=top_n_xtb,
-            charge=charge,
-            mult=mult,
-            gfn=gfn,
-            optimize=True
-        )
+        if top_n_xtb:
+            xyz_file_xtb_uma = conf_xtb(
+                work_dir,
+                xyz_file_MMFF,
+                top_n_xtb=top_n_xtb,
+                charge=charge,
+                mult=mult,
+                gfn=gfn,
+                optimize=True
+            )
+
+        # Optimize conformers using UMA
+        if top_n_uma:
+            xyz_file_xtb_uma = uma(
+                work_dir,
+                xyz_file_MMFF,
+                top_n_uma=top_n_uma,
+                charge=charge,
+                mult=mult,
+                model_name="uma-m-1p1",
+                task_name="omol",
+                max_steps=max_steps_uma,
+                fmax=fmax_uma,
+                device=None,
+                opt_log=True,
+                use_local_uma=use_local_uma,
+                local_checkpoint=local_checkpoint,
+                hf_cache_dir=hf_cache_dir,
+                hf_offline=hf_offline,
+            )
 
         # Optimize conformers using Gaussian
         xyz_file_gaussian = qm_gaussian(
             work_dir,
-            xyz_file_xtb,
+            xyz_file_xtb_uma,
             gjf_filename="conf",
             charge=charge,
             mult= mult,
@@ -223,6 +292,29 @@ class MDRun:
             pdb_file,
             temperature,
             gpu,
+        )
+
+    @staticmethod
+    def relax_poly_chain_from_json(
+        work_dir: Path | str,
+        json_file: str,
+        pdb_file: str,
+        temperature: int = 1000,
+        gpu: bool = False,
+    ):
+        work_dir = Path(work_dir)
+        json_path = os.path.join(work_dir, json_file)
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        poly = data["polymer"]
+
+        return relax_poly_chain(
+            work_dir,
+            name = poly["name"],
+            resname = poly["resname"],
+            pdb_file = pdb_file,
+            temperature = temperature,
+            gpu = gpu,
         )
 
 

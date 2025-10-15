@@ -169,7 +169,7 @@ def conf_xtb(
             else:
                 print(f"File {src} not found.")
 
-    print(f"[3] Saved {len(top_structures)} lowest-energy xtb structures to xtb_top{top_n_xtb}.xyz'.\n")
+    print(f"[3] Saved {len(top_structures)} lowest-energy xtb structures to 'xtb_top{top_n_xtb}.xyz'.\n")
 
     return output_path
 
@@ -193,18 +193,20 @@ def qm_gaussian(
         optimize: bool = True,
         multi_step: bool = False,
         max_attempts: int = 1,
-        toxyz: bool = True,
-        top_n_qm: int = 4,
+        toxyz: bool = False,
+        top_n_qm: int | None = None,
 ):
+
     work_path = Path(work_dir)
-    qm_dir = work_path / f'QM_dir'
+    qm_dir = work_path / 'QM_dir'
     qm_dir.mkdir(parents=True, exist_ok=True)
 
     xyz_path = Path(work_dir) / xyz_file
     structures = sim_lib.read_xyz_file(xyz_path)
 
-    for idx, structure in enumerate(structures):
+    success_indices: list[int] = []
 
+    for idx, structure in enumerate(structures):
         filename = f'{gjf_filename}_{idx}.gjf'
         Gau = PEMDGaussian(
             work_dir=qm_dir,
@@ -216,9 +218,9 @@ def qm_gaussian(
             function=function,
             basis_set=basis_set,
             epsilon=epsilon,
-            optimize=optimize,  # Ensure optimization runs
-            multi_step=multi_step,  # Toggle multi-step based on gaucontinue
-            max_attempts=max_attempts,          # Adjust as needed
+            optimize=optimize,
+            multi_step=multi_step,
+            max_attempts=max_attempts,
         )
 
         state, log_filename = Gau.run_local(
@@ -229,23 +231,35 @@ def qm_gaussian(
 
         if state == 'success':
             Gau.logger.info(f"Optimization succeeded for {filename}.")
-            # print(f"Structure {idx}: Calculation SUCCESS.")
+            success_indices.append(idx)
         else:
             Gau.logger.error(f"Optimization failed for {filename}.")
-            # print(f"Structure {idx}: Calculation FAILED.")
 
-    if toxyz:
-        output_file = f"gaussian_top{top_n_qm}.xyz"
-        output_filepath = Path(work_dir) / output_file
+    if toxyz or top_n_qm is not None:
+        n_success = len(success_indices)
+        if n_success == 0:
+            print("[4] No successful Gaussian jobs. Skip exporting xyz.")
+            return None
+
+        if (top_n_qm is None) or (top_n_qm in (0, -1)) or (top_n_qm >= n_success):
+            n_keep = n_success
+            out_name = "gaussian_all.xyz"
+        else:
+            n_keep = max(1, int(top_n_qm))
+            out_name = f"gaussian_top{n_keep}.xyz"
+
+        output_filepath = Path(work_dir) / out_name
         sim_lib.order_energy_gaussian(
             qm_dir,
             gjf_filename,
-            top_n_qm,
+            n_keep,
             output_filepath,
         )
 
-        print(f"[4] Saved {top_n_qm} lowest-energy Gaussian structures to gaussian_top{top_n_qm}.xyz.")
-        return output_file
+        print(f"[4] Saved {n_keep}/{n_success} lowest-energy Gaussian structures to {out_name}.")
+        return out_name
+
+    return None
 
 
 def calc_resp_gaussian(

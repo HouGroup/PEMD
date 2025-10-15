@@ -9,6 +9,7 @@ import logging
 import numpy as np
 import pandas as pd
 import PEMD.io as io
+import networkx as nx
 import PEMD.constants as const
 
 from rdkit import Chem
@@ -16,6 +17,7 @@ from pathlib import Path
 from rdkit import RDLogger
 from rdkit.Chem import AllChem
 from PEMD.model import model_lib
+from scipy.spatial import cKDTree
 from rdkit.Chem import Descriptors
 from rdkit.Geometry import Point3D
 from collections import defaultdict
@@ -51,11 +53,10 @@ def gen_sequence_copolymer_3D(name,
                               left_cap_smiles=None,
                               right_cap_smiles=None,):
     """
-    Generic sequence construction: ``sequence`` is a list such as
-    ``['A', 'B', 'B', 'A', …]``.
+    通用序列构建：sequence 是一个列表，如 ['A','B','B','A',…]
     """
 
-    # 1. Pre-initialize information for monomers A and B
+    # 1. 预先初始化 A、B 单体的信息
     dumA1, dumA2, atomA1, atomA2 = Init_info(name, smiles_A)
     dumB1, dumB2, atomB1, atomB2 = Init_info(name, smiles_B)
 
@@ -69,7 +70,7 @@ def gen_sequence_copolymer_3D(name,
 
     connecting_mol = Chem.RWMol(mol_1)
 
-    # 3. Sequentially append the remaining units
+    # 3. 依次添加后续单元
     tail_idx = t_1
     num_atom = connecting_mol.GetNumAtoms()
 
@@ -86,16 +87,29 @@ def gen_sequence_copolymer_3D(name,
 
         _, ideal_direction = get_vector(connecting_mol, tail_idx)
 
-        # Add an extra 0.1 Å to reduce close contacts for key functional groups
-        target_pos = tail_pos + (bond_length + 0.1) * ideal_direction
+        # 增加0.1 Å的额外距离以缓解关键基团过近的问题
+        target_pos = tail_pos + (bond_length + 0.12) * ideal_direction
 
         new_unit = Chem.Mol(mon)
         new_unit = align_monomer_unit(new_unit, h, target_pos, ideal_direction)
 
-        # Apply an additional rotation of the new unit around the connecting bond axis
-        if not check_3d_structure(connecting_mol):
-            extra_angle = 0.20
-            atom_indices_to_rotate = [j for j in range(new_unit.GetNumAtoms()) if j != h_1]
+        # === 新增：围绕连接轴做确定性扭转扫描，最小化与现有聚合物的碰撞 ===
+        new_unit, best_ang, best_off, best_pen = _torsion_place_without_clash(
+            connecting_mol=connecting_mol,
+            new_unit=new_unit,
+            tail_idx=tail_idx,
+            unit_head_idx=h,
+            axis_dir=ideal_direction,
+            anchor=target_pos,
+            angles=np.linspace(0, 2*np.pi, 60, endpoint=False),  # 稍细一些
+            offsets=[0.0, 0.15, 0.30, 0.45]
+        )
+        logger.debug(f"[place] angle={best_ang:.3f} rad, offset={best_off:.2f} Å, penalty={best_pen:.4f}")
+
+        # （可留作兜底的小角度额外扰动；通常不再需要）
+        if has_overlapping_atoms(connecting_mol):
+            extra_angle = 0.10
+            atom_indices_to_rotate = [j for j in range(new_unit.GetNumAtoms()) if j != h]
             rotate_substructure_around_axis(new_unit, atom_indices_to_rotate,
                                             ideal_direction, target_pos, extra_angle)
 
@@ -110,8 +124,8 @@ def gen_sequence_copolymer_3D(name,
                      if nbr.GetAtomicNum() == 1]
         place_h_in_tetrahedral(combined_mol, head_idx, h_indices)
 
-        # Perform a local optimization to relax any residual steric clashes
-        if not check_3d_structure(combined_mol):
+        # local optimize
+        if has_overlapping_atoms(combined_mol):
             combined_mol = local_optimize(combined_mol, maxIters=150)
         connecting_mol = Chem.RWMol(combined_mol)
 
@@ -129,6 +143,294 @@ def gen_sequence_copolymer_3D(name,
     )
 
     return final_poly
+
+def _vdw_radius(Z: int) -> float:
+    table = {
+        1: 1.20, 6: 1.70, 7: 1.55, 8: 1.52, 9: 1.47,
+        15: 1.80, 16: 1.80, 17: 1.75, 35: 1.85, 53: 1.98
+    }
+    return table.get(Z, 1.8)
+
+def _polymer_kdtree(mol: Chem.Mol, exclude_idx: set[int] | None = None, skip_h: bool = True):
+    conf = mol.GetConformer()
+    pts, zs = [], []
+    for i in range(mol.GetNumAtoms()):
+        if exclude_idx and i in exclude_idx:
+            continue
+        Z = mol.GetAtomWithIdx(i).GetAtomicNum()
+        if skip_h and Z == 1:
+            continue
+        pts.append(np.array(conf.GetAtomPosition(i), dtype=float))
+        zs.append(Z)
+    if not pts:
+        pts = [np.array([1e9,1e9,1e9])]
+    return cKDTree(np.vstack(pts)), np.array(zs, dtype=int)
+
+def _unit_bounding_radius(unit: Chem.Mol, head_idx: int, skip_h: bool = True, include_vdw: bool = True, scale: float = 1.0) -> float:
+    conf = unit.GetConformer()
+    c = np.array(conf.GetAtomPosition(head_idx), dtype=float)
+    r = 0.0
+    for i in range(unit.GetNumAtoms()):
+        if i == head_idx:
+            continue
+        Zi = unit.GetAtomWithIdx(i).GetAtomicNum()
+        if skip_h and Zi == 1:
+            continue
+        d = np.linalg.norm(np.array(conf.GetAtomPosition(i), dtype=float) - c)
+        if include_vdw:
+            d += _vdw_radius(Zi)
+        r = max(r, d)
+    return r * scale
+
+def _orthonormal_basis(n: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    n = n / (np.linalg.norm(n) + 1e-12)
+    h = np.array([1.0, 0.0, 0.0])
+    if abs(np.dot(h, n)) > 0.9:
+        h = np.array([0.0, 1.0, 0.0])
+    u = h - np.dot(h, n) * n
+    u /= np.linalg.norm(u) + 1e-12
+    v = np.cross(n, u)
+    v /= np.linalg.norm(v) + 1e-12
+    return u, v
+
+def _directions_in_cone(base_dir: np.ndarray, half_deg: float = 30.0, n_phi: int = 12) -> list[np.ndarray]:
+    """
+    在 base_dir 周围半角 half_deg 的圆锥内生成一组候选方向（含 base_dir 本身）。
+    """
+    base = base_dir / (np.linalg.norm(base_dir) + 1e-12)
+    out = [base.copy()]
+    u, v = _orthonormal_basis(base)
+    # 多圈同心环：0°, 10°, 20°, 30°
+    for tilt_deg in (10.0, 20.0, half_deg):
+        tilt = np.deg2rad(tilt_deg)
+        for k in range(n_phi):
+            phi = 2*np.pi * k / n_phi
+            d = np.cos(tilt)*base + np.sin(tilt)*(np.cos(phi)*u + np.sin(phi)*v)
+            out.append(d / (np.linalg.norm(d) + 1e-12))
+    return out
+
+def _clearance_margin_at_point(poly_tree: cKDTree, poly_Z: np.ndarray, pt: np.ndarray, R_unit: float, scale: float = 0.85) -> float:
+    """
+    返回该点的最小安全裕度：min_j ( ||pt - r_j|| - (R_unit + scale*vdw_j) )
+    >0 表示安全；<0 表示碰撞或过近。
+    """
+    # 先用一个略保守的搜索半径拿近邻
+    idxs = poly_tree.query_ball_point(pt, r=R_unit + 2.6)
+    if not idxs:
+        return 1e3  # 非常安全
+    margins = []
+    for j in idxs:
+        d = np.linalg.norm(poly_tree.data[j] - pt)
+        margins.append(d - (R_unit + scale * _vdw_radius(int(poly_Z[j]))))
+    return min(margins) if margins else 1e3
+
+def _direction_clearance_score(poly_tree: cKDTree, poly_Z: np.ndarray,
+                               tail_pos: np.ndarray, direction: np.ndarray,
+                               R_unit: float, s_start: float, s_window: float,
+                               n_samples: int = 8, scale: float = 0.85) -> float:
+    """
+    沿 direction 从 s_start 开始、长度 s_window 的线段上均匀采样，取最小裕度。
+    """
+    mins = []
+    for s in np.linspace(s_start, s_start + s_window, n_samples):
+        pt = tail_pos + s*direction
+        mins.append(_clearance_margin_at_point(poly_tree, poly_Z, pt, R_unit, scale))
+    return min(mins) if mins else 1e3
+
+def _choose_extension_direction_and_offset(connecting_mol: Chem.Mol,
+                                           tail_idx: int,
+                                           base_dir: np.ndarray,
+                                           R_unit: float,
+                                           bond_length: float,
+                                           lookahead: float = 1.2,
+                                           allow_offsets: tuple[float,...] = (0.0, 0.2, 0.4, 0.6),
+                                           cone_half_deg: float = 30.0) -> tuple[np.ndarray, float, float]:
+    """
+    先在圆锥内选“最宽敞”的方向；若该方向最近裕度<0，则允许增加少量轴向 offset 再评估。
+    返回：(best_dir, best_offset, best_margin)
+    """
+    conf = connecting_mol.GetConformer()
+    tail_pos = np.array(conf.GetAtomPosition(tail_idx), dtype=float)
+    poly_tree, poly_Z = _polymer_kdtree(connecting_mol, exclude_idx={tail_idx}, skip_h=True)
+
+    dirs = _directions_in_cone(base_dir, half_deg=cone_half_deg, n_phi=12)
+
+    best = (dirs[0], 0.0, -1e9)
+    for d in dirs:
+        for off in allow_offsets:
+            margin = _direction_clearance_score(
+                poly_tree, poly_Z, tail_pos, d,
+                R_unit=R_unit,
+                s_start=bond_length + off,
+                s_window=max(lookahead, 0.6),  # 前方再看 ~1 Å
+                n_samples=8, scale=0.85,
+            )
+            # 目标：最大化最小裕度
+            if margin > best[2] or (np.isclose(margin, best[2]) and off < best[1]):
+                best = (d, off, margin)
+
+    return best  # (best_dir, best_offset, best_margin)
+
+def _save_positions(mol: Chem.Mol):
+    conf = mol.GetConformer()
+    return np.array(conf.GetPositions(), dtype=float)
+
+def _restore_positions(mol: Chem.Mol, pos: np.ndarray):
+    conf = mol.GetConformer()
+    for i, p in enumerate(pos):
+        conf.SetAtomPosition(i, Point3D(*p))
+
+def _clash_penalty_against_tree(new_unit: Chem.Mol,
+                                unit_conn_idx: int,
+                                poly_tree: cKDTree,
+                                poly_Z: np.ndarray,
+                                scale: float = 0.85,
+                                max_cutoff: float = 2.6,
+                                skip_h: bool = True) -> float:
+    """
+    计算新单元（除连接原子）相对聚合物 KDTree 的“重叠代价”。
+    代价 = sum( max(0, r_min - d)^2 )，r_min ~ scale*(rvdw_i + rvdw_j) 且 capped by max_cutoff。
+    """
+    conf = new_unit.GetConformer()
+    penalty = 0.0
+    for i in range(new_unit.GetNumAtoms()):
+        if i == unit_conn_idx:
+            continue
+        Zi = new_unit.GetAtomWithIdx(i).GetAtomicNum()
+        if skip_h and Zi == 1:
+            continue
+        pi = np.array(conf.GetAtomPosition(i), dtype=float)
+        # 先找一个近邻半径
+        guess = max_cutoff
+        idxs = poly_tree.query_ball_point(pi, r=guess)
+        if not idxs:
+            continue
+        ri = _vdw_radius(Zi)
+        for j in idxs:
+            rj = _vdw_radius(int(poly_Z[j]))
+            rmin = min(max_cutoff, scale*(ri + rj))
+            d = np.linalg.norm(poly_tree.data[j] - pi)
+            if d < rmin:
+                penalty += (rmin - d)**2
+    return penalty
+
+def _torsion_place_without_clash(connecting_mol: Chem.Mol,
+                                 new_unit: Chem.Mol,
+                                 tail_idx: int,
+                                 unit_head_idx: int,
+                                 axis_dir: np.ndarray,
+                                 anchor: np.ndarray,
+                                 angles: np.ndarray | None = None,
+                                 offsets: list[float] | None = None) -> tuple[Chem.Mol, float, float, float]:
+    """
+    围绕连接轴对新单元做扭转扫描 + 轻微轴向位移，选择碰撞代价最小的姿态。
+    返回：(优化后 new_unit, best_angle, best_offset, best_penalty)
+    """
+    if angles is None:
+        angles = np.linspace(0, 2*np.pi, 48, endpoint=False)
+    if offsets is None:
+        offsets = [0.0, 0.15, 0.30, 0.45]  # Å，轻微拉开
+
+    # 聚合物 KDTree（排除尾原子本身，且忽略氢）
+    poly_tree, poly_Z = _polymer_kdtree(connecting_mol, exclude_idx={tail_idx}, skip_h=True)
+
+    # 新单元：只绕 head 原子旋转其他原子
+    rotatable = [j for j in range(new_unit.GetNumAtoms()) if j != unit_head_idx]
+
+    # 保留一份原始 3D 位置
+    pos0 = _save_positions(new_unit)
+
+    best = (None, None, None, float("inf"))
+    for off in offsets:
+        # 先应用轴向微移
+        _restore_positions(new_unit, pos0)
+        if abs(off) > 1e-8:
+            rotate_substructure_around_axis(new_unit, [], axis_dir, anchor, 0.0)  # no-op，确保 conf 存在
+            conf = new_unit.GetConformer()
+            for i in range(new_unit.GetNumAtoms()):
+                p = np.array(conf.GetAtomPosition(i), dtype=float)
+                conf.SetAtomPosition(i, Point3D(*(p + axis_dir*off)))
+
+        for ang in angles:
+            # 每个角度都从“当前 offset”的状态出发
+            _restore_positions(new_unit, _save_positions(new_unit))
+            rotate_substructure_around_axis(new_unit, rotatable, axis_dir, anchor, ang)
+            pen = _clash_penalty_against_tree(new_unit, unit_head_idx, poly_tree, poly_Z)
+            if pen < best[3]:
+                best = (_save_positions(new_unit), ang, off, pen)
+                if pen == 0.0:
+                    break
+        if best[3] == 0.0:
+            break
+
+    # 应用最佳姿态
+    if best[0] is not None:
+        _restore_positions(new_unit, best[0])
+    return new_unit, (best[1] or 0.0), (best[2] or 0.0), best[3]
+
+def get_min_distance(mol, atom1, atom2, bond_graph, connected_distance=1.0, disconnected_distance=1.55):
+    """
+    根据原子对的连接情况及原子类型返回最小允许距离：
+      - 如果 atom1 和 atom2 之间存在化学键，则返回 connected_distance
+      - 如果不相连，则：
+          * 如果任一原子为氧、卤素（F, Cl, Br, I）、氢原子，
+            或两个原子均为碳，则返回 1.6 Å （你可以根据需要调整该数值，例如改为 2.1 Å）
+          * 如果有氧、卤素与氢原子之间的连接，返回 1.8 Å
+          * 否则返回 disconnected_distance。
+    """
+    if bond_graph.has_edge(atom1, atom2):
+        return connected_distance
+    else:
+        symbol1 = mol.GetAtomWithIdx(atom1).GetSymbol()
+        symbol2 = mol.GetAtomWithIdx(atom2).GetSymbol()
+
+        # 判断条件：氧、卤素和氢原子之间的连接返回 1.8 Å
+        if (symbol1 in ['O', 'F', 'Cl', 'Br', 'I'] and symbol2 in ['H']) or \
+                (symbol1 in ['H'] and symbol2 in ['O', 'F', 'Cl', 'Br', 'I']) or \
+                (symbol1 == 'N' and symbol2 == 'O') or (symbol1 == 'O' and symbol2 == 'N'):
+            return 1.75
+        # 判断条件：氧、卤素、氮和碳之间的连接返回 1.6 Å
+        elif (symbol1 in ['O', 'F', 'Cl', 'Br', 'I'] and symbol2 in ['O', 'F', 'Cl', 'Br', 'I']) or \
+                (symbol1 == 'C' and symbol2 == 'O') or (symbol1 == 'O' and symbol2 == 'C'):
+            return 1.6
+        else:
+            return disconnected_distance
+
+def has_overlapping_atoms(mol, connected_distance=1.0, disconnected_distance=1.56):
+    """
+    检查分子中是否存在原子重叠：
+      - 如果两个原子通过化学键相连，则允许的最小距离为 connected_distance
+      - 如果不相连，则默认使用 disconnected_distance，
+        如果任一原子为氧或卤素（F, Cl, Br, I）或两个原子均为碳，
+        则要求最小距离为 1.6 Å（你也可以修改为 2.1 Å，根据需要）。
+    当检测到原子对距离过近时，会输出相关信息，包括原子的名称。
+    """
+    # 获取所有原子的坐标
+    conf = mol.GetConformer()
+    positions = conf.GetPositions()
+
+    # 构建一个无向图来存储化学键连接关系
+    bond_graph = nx.Graph()
+    for i in range(mol.GetNumAtoms()):
+        bond_graph.add_node(i, position=positions[i])
+    for bond in mol.GetBonds():
+        atom1 = bond.GetBeginAtomIdx()
+        atom2 = bond.GetEndAtomIdx()
+        bond_graph.add_edge(atom1, atom2)
+
+    # 创建一个图用于存储重叠关系
+    G = nx.Graph()
+    num_atoms = mol.GetNumAtoms()
+    for i in range(num_atoms):
+        for j in range(i + 1, num_atoms):
+            distance = np.linalg.norm(positions[i] - positions[j])
+            actual_min = get_min_distance(mol, i, j, bond_graph,
+                                          connected_distance,
+                                          disconnected_distance)
+            if distance < actual_min:
+                G.add_edge(i, j, weight=distance)
+
+    return len(G.edges) > 0
 
 
 # Processes a polymer’s SMILES string with dummy atoms to set up connectivity and identify the connecting atoms.
@@ -209,25 +511,24 @@ def prepare_monomer_nocap(smiles_mid: str,
                           atom1: int,
                           atom2: int) -> tuple[Chem.Mol, int, int]:
     """
-    Process a SMILES string containing dummy atoms by:
-      - generating 3D coordinates and optimizing them,
-      - adding hydrogens (Embed & Optimize), and
-      - removing the dummy atoms.
-
-    Returns:
-      - ``monomer``: the RDKit ``Mol`` with dummy atoms removed,
-      - ``head_idx``: the index corresponding to ``atom1`` after removal, and
-      - ``tail_idx``: the index corresponding to ``atom2`` after removal.
+    将带 dummy 原子的 SMILES:
+      - 插入 3D 坐标并优化
+      - 添加氢，Embed & Optimize
+      - 移除 dummy 原子
+    返回:
+      - monomer: 去除 dummy 后的 RDKit Mol
+      - head_idx: 删除后对应 atom1 的索引
+      - tail_idx: 删除后对应 atom2 的索引
     """
-    # 1. Build the RDKit molecule and replace ``*`` with real atoms
+    # 1. 生成 RDKit 分子，替换 '*' 为原子
     mol = Chem.MolFromSmiles(smiles_mid)
     if mol is None:
         raise ValueError(f"Invalid SMILES: {smiles_mid}")
     rw = Chem.RWMol(mol)
     for atom in rw.GetAtoms():
         if atom.GetSymbol() == '*':
-            atom.SetAtomicNum(53)  # Use iodine as a placeholder for the dummy atom
-    # 2. Add hydrogens and embed the geometry
+            atom.SetAtomicNum(53)  # Iodine 代替 dummy
+    # 2. 添加氢并 embed
     rw = Chem.RWMol(Chem.AddHs(rw))
     params = AllChem.ETKDGv3()
     params.randomSeed = -1
@@ -235,13 +536,13 @@ def prepare_monomer_nocap(smiles_mid: str,
         logger.warning("3D embedding failed for monomer.")
     AllChem.MMFFOptimizeMolecule(rw)
 
-    # 3. Remove the dummy atoms
+    # 3. 移除 dummy 原子
     to_remove = sorted([dum1, dum2], reverse=True)
     for idx in to_remove:
         rw.RemoveAtom(idx)
     monomer = rw.GetMol()
 
-    # 4. Compute the updated head/tail indices
+    # 4. 计算新的 head/tail 索引
     def adjust(i: int) -> int:
         return i - sum(1 for r in to_remove if r < i)
 
@@ -306,10 +607,8 @@ def prepare_cap_monomer(smiles_cap: str) -> tuple[Chem.Mol, int, np.ndarray]:
 
 def get_vector(mol, index):
     """
-    For the specified atom, return its position and the average unit vector
-    formed by the directions to all neighboring atoms. If the atom has no
-    neighbors or the averaged direction is too small, fall back to the default
-    direction.
+    对于指定原子，返回其位置及其与所有邻接原子连线方向的平均单位向量。
+    若无邻居或平均向量过小，则返回默认方向。
     """
     conf = mol.GetConformer()
     pos = np.array(conf.GetAtomPosition(index))
@@ -365,8 +664,8 @@ def align_monomer_unit(monomer,
 
 def rotate_substructure_around_axis(mol, atom_indices, axis, anchor, angle_rad):
     """
-    Rotate the atoms specified by ``atom_indices`` around the unit vector
-    ``axis`` by ``angle_rad`` radians, using ``anchor`` as the rotation center.
+    对分子中给定 atom_indices 列表中的原子，
+    以 anchor 为中心绕单位向量 axis 旋转 angle_rad 弧度。
     """
     conf = mol.GetConformer()
     rot = R.from_rotvec(axis * angle_rad)
@@ -378,17 +677,16 @@ def rotate_substructure_around_axis(mol, atom_indices, axis, anchor, angle_rad):
 
 def place_h_in_tetrahedral(mol, atom_idx, h_indices):
     """
-    Reposition the hydrogens attached to ``atom_idx`` so that the local geometry
-    matches the expected configuration. Special handling is provided for NH₂
-    (a nitrogen atom with one heavy neighbor and two hydrogens); other cases
-    use the standard tetrahedral placement.
+    重新定位中心原子 atom_idx 上的氢原子，使局部几何尽量符合预期构型。
+    针对 NH2（氮原子、1 个重邻居、2 个氢）单独处理，
+    对于其他情况仍采用正四面体方法。
     """
     conf = mol.GetConformer()
     center_pos = np.array(conf.GetAtomPosition(atom_idx))
     center_atom = mol.GetAtomWithIdx(atom_idx)
     heavy_neighbors = [nbr.GetIdx() for nbr in center_atom.GetNeighbors() if nbr.GetAtomicNum() != 1]
 
-    # Detect the NH2 case: nitrogen, one heavy neighbor, and exactly two hydrogens
+    # 检测是否为 NH2 型：氮原子、1 个重邻居、传入2个氢
     if center_atom.GetAtomicNum() == 7 and len(heavy_neighbors) == 1 and len(h_indices) == 2:
         hv_idx = heavy_neighbors[0]
         hv_pos = np.array(conf.GetAtomPosition(hv_idx))
@@ -399,31 +697,30 @@ def place_h_in_tetrahedral(mol, atom_idx, h_indices):
         else:
             v = v / np.linalg.norm(v)
 
-        # Retrieve the ideal tetrahedral directions (four unit vectors)
-        tet_dirs = _get_ideal_tetrahedral_vectors()
+        # 获取理想正四面体方向
+        tet_dirs = _get_ideal_tetrahedral_vectors()  # 返回4个单位向量
 
-        # 1. Select the direction most aligned with ``v`` (the heavy neighbor)
+        # 1. 找出与 v 最一致的方向（应对应于重邻居方向）
         dots = [np.dot(d, v) for d in tet_dirs]
         idx_heavy = np.argmax(dots)
 
-        # 2. Among the remaining directions, find the one closest to ``-v``
-        #    (corresponding to the lone pair, no hydrogen placement)
+        # 2. 在剩下的3个方向中，找出与 -v 最一致的方向（对应孤对，暂不放氢）
         remaining = [(i, d) for i, d in enumerate(tet_dirs) if i != idx_heavy]
         dots_neg = [np.dot(d, -v) for i, d in remaining]
         idx_lonepair = remaining[np.argmax(dots_neg)][0]
 
-        # 3. Use the remaining two directions for the hydrogens
+        # 3. 剩下的两个方向用来放置氢原子
         h_dirs = [d for i, d in enumerate(tet_dirs) if i not in (idx_heavy, idx_lonepair)]
         if len(h_dirs) != 2:
             logger.error("Internal error: expected 2 hydrogen directions, got %s", len(h_dirs))
             return
 
-        CH_BOND = 1.09  # Typical C–H bond length
-        # Set the new positions for the two hydrogens
+        CH_BOND = 1.09  # 典型 C–H 键长
+        # 首先为两个氢原子设定新的位置
         new_pos_1 = center_pos + CH_BOND * h_dirs[0]
         new_pos_2 = center_pos + CH_BOND * h_dirs[1]
 
-        # Check distances between hydrogens to avoid overlaps
+        # 检查氢原子之间的距离，避免重叠
         for i, h_idx in enumerate(h_indices):
             if i == 0:
                 new_pos = new_pos_1
@@ -432,11 +729,11 @@ def place_h_in_tetrahedral(mol, atom_idx, h_indices):
             for other_h_idx in h_indices:
                 if other_h_idx != h_idx:
                     other_h_pos = np.array(conf.GetAtomPosition(other_h_idx))
-                    if np.linalg.norm(new_pos - other_h_pos) < 0.8:  # Threshold to prevent overlap
+                    if np.linalg.norm(new_pos - other_h_pos) < 0.8:  # 检查阈值，防止重叠
                         logger.warning(f"Hydrogen atoms {h_idx} and {other_h_idx} overlap! Adjusting.")
-                        new_pos += np.random.uniform(0.1, 0.2, size=3)  # Slightly perturb the position
+                        new_pos += np.random.uniform(0.1, 0.2, size=3)  # 轻微调整位置
 
-        # Update the hydrogen positions
+        # 更新氢原子位置
         conf.SetAtomPosition(h_indices[0], new_pos_1)
         conf.SetAtomPosition(h_indices[1], new_pos_2)
         return
@@ -448,19 +745,19 @@ def local_optimize(mol, maxIters=100, num_retries=1000, perturbation=0.01):
             mol.UpdatePropertyCache(strict=False)
             _ = Chem.GetSymmSSSR(mol)
 
-            # Before optimizing, ensure there are no overlapping atoms
-            if not check_3d_structure(mol):
-                logger.warning("\nMolecule has overlapping atoms, adjusting atomic positions.")
+            # 优化前检查是否有重叠原子
+            if has_overlapping_atoms(mol):
+                # logger.warning("\nMolecule has overlapping atoms, adjusting atomic positions.")
                 conf = mol.GetConformer()
                 for i in range(mol.GetNumAtoms()):
                     pos = np.array(conf.GetAtomPosition(i))
-                    if mol.GetAtomWithIdx(i).GetAtomicNum() == 1:  # Only adjust hydrogens
+                    if mol.GetAtomWithIdx(i).GetAtomicNum() == 1:  # 仅调整氢原子
                         conf.SetAtomPosition(i, pos + np.random.uniform(0.01, 1.8, size=3))
 
             status = AllChem.MMFFOptimizeMolecule(mol, maxIters=maxIters)
             if status < 0:
                 raise RuntimeError("MMFF optimization returned status %s" % status)
-            return mol  # Optimization succeeded; return the molecule
+            return mol  # 优化成功，返回分子
 
         except Exception as e:
             logger.warning(f"Local optimization attempt {attempt + 1} failed: {e}")
@@ -474,7 +771,7 @@ def local_optimize(mol, maxIters=100, num_retries=1000, perturbation=0.01):
 
 def rotate_vector_to_align(a, b):
     """
-    Return a rotation object that aligns vector ``a`` with vector ``b``.
+    返回一个旋转对象，使得向量 a 旋转后与向量 b 对齐。
     """
     a_norm = a / np.linalg.norm(a) if np.linalg.norm(a) > 1e-6 else const.DEFAULT_DIRECTION
     b_norm = b / np.linalg.norm(b) if np.linalg.norm(b) > 1e-6 else const.DEFAULT_DIRECTION
@@ -497,7 +794,7 @@ def rotate_vector_to_align(a, b):
 
 def _get_ideal_tetrahedral_vectors():
     """
-    Return four normalized reference vectors representing an ideal tetrahedron.
+    返回理想正四面体状态下4个顶点的归一化参考向量。
     """
     vs = [
         [1, 1, 1],
@@ -570,7 +867,7 @@ def attach_methyl_cap(base_mol: Chem.Mol, terminal_idx: int) -> Chem.Mol:
     if not h_atoms:
         raise ValueError("Failed to construct methyl fragment with hydrogens.")
     em = Chem.EditableMol(fragment)
-    em.RemoveAtom(h_atoms[0])  # Remove one hydrogen to free the connection site
+    em.RemoveAtom(h_atoms[0])  # 删除一个 H 以连接主链
     fragment = em.GetMol()
 
     connection_idx = [a.GetIdx() for a in fragment.GetAtoms() if a.GetSymbol() == 'C'][0]
@@ -638,7 +935,7 @@ def gen_3D_withcap(mol, start_atom, end_atom, length, left_cap_smiles=None, righ
                 )
         capped_mol = attach_default_cap(capped_mol, terminal_idx)
 
-    # Verify that interatomic distances are reasonable
+    # 检查原子间距离是否合理
     valid_structure = check_3d_structure(capped_mol)
     if length <= 3 or valid_structure:
         return capped_mol
@@ -696,9 +993,9 @@ def calc_mol_weight(pdb_file):
             Chem.SanitizeMol(mol)
             return Descriptors.MolWt(mol)
         else:
-            raise ValueError(f"RDKit failed to parse PDB file: {pdb_file}")
+            raise ValueError(f"RDKit 无法解析 PDB 文件: {pdb_file}")
     except (Chem.rdchem.AtomValenceException, Chem.rdchem.KekulizeException, ValueError):
-        # If RDKit parsing fails, attempt to compute the molecular weight manually
+        # 如果 RDKit 解析失败，尝试手动计算分子量
         try:
             atom_counts = defaultdict(int)
             with open(pdb_file, 'r') as f:
@@ -706,12 +1003,12 @@ def calc_mol_weight(pdb_file):
                     if line.startswith(("ATOM", "HETATM")):
                         element = line[76:78].strip()
                         if not element:
-                            # Infer the element symbol from the atom name
+                            # 从原子名称推断元素符号
                             atom_name = line[12:16].strip()
                             element = ''.join([char for char in atom_name if char.isalpha()]).upper()[:2]
                         atom_counts[element] += 1
 
-            # Atomic weights (g/mol) for common elements
+            # 常见元素的原子质量（g/mol）
             atomic_weights = {
                 'H': 1.008,
                 'C': 12.011,
@@ -725,18 +1022,18 @@ def calc_mol_weight(pdb_file):
                 'I': 126.904,
                 'FE': 55.845,
                 'ZN': 65.38,
-                # Add more elements as needed
+                # 根据需要添加更多元素
             }
 
             mol_weight = 0.0
             for atom, count in atom_counts.items():
                 weight = atomic_weights.get(atom.upper())
                 if weight is None:
-                    raise ValueError(f"Unknown atom type '{atom}' in PDB file: {pdb_file}")
+                    raise ValueError(f"未知的原子类型 '{atom}' 在 PDB 文件: {pdb_file}")
                 mol_weight += weight * count
             return mol_weight
         except Exception as e:
-            raise ValueError(f"Failed to compute molecular weight for {pdb_file}: {e}")
+            raise ValueError(f"无法计算分子量，PDB 文件: {pdb_file}，错误: {e}")
 
 
 

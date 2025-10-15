@@ -6,7 +6,7 @@ from PEMD.core.analysis import PEMDAnalysis
 from PEMD.core.run import QMRun
 
 
-work_dir = '/'
+work_dir = './'
 poly_name = 'PEO'
 
 center_atom_name = 'resname NSC and name NBT'
@@ -19,8 +19,8 @@ select_dict = {
     "PEO": 'resname MOL and name H',
 }
 
-xyzfile = PEMDAnalysis.write_cluster_polymer(
-    work_dir ='/',
+xyzfile_md = PEMDAnalysis.write_cluster_polymer(
+    work_dir ='./',
     tpr_file = 'nvt_prod.tpr',
     wrap_xtc_file = 'nvt_prod.xtc',
     center_atom_name = center_atom_name,
@@ -36,9 +36,23 @@ xyzfile = PEMDAnalysis.write_cluster_polymer(
     write_freq = 0.10,
 )
 
-QMRun.qm_gaussian(
-   work_dir ='/',
-   xyz_file = xyzfile,
+xyzfile_uma = QMRun.uma(
+    work_dir ='./',
+    xyz_file = xyzfile_md,
+    charge = -1,
+    mult = 1,
+    model_name = 'uma-m-1p1',
+    task_name = 'omol',
+    max_steps = 1000,
+    fmax = 0.02,
+    use_local_uma = True,
+    local_checkpoint = 'uma-m-1p1.pt',
+    top_n_uma = 100
+)
+
+xyzfile_qm_neu_1 = QMRun.qm_gaussian(
+   work_dir ='./',
+   xyz_file = xyzfile_uma,
    gjf_filename = 'conf',
    charge = -1,
    mult = 1,
@@ -52,9 +66,9 @@ QMRun.qm_gaussian(
    top_n_qm = 5
 )
 
-QMRun.qm_gaussian(
-    work_dir ='/',
-    xyz_file = 'gaussian_top5.xyz',
+xyzfile_qm_neu_2 = QMRun.qm_gaussian(
+    work_dir ='./',
+    xyz_file = xyzfile_qm_neu_1,
     gjf_filename = f'{poly_name}_init',
     charge = -1,
     mult = 1,
@@ -65,11 +79,25 @@ QMRun.qm_gaussian(
     memory = '64GB',
     multi_step = True,
     max_attempts = 4,
+    toxyz = True,
+)
+
+xyzfile_uma_neg = QMRun.uma(
+    work_dir ='./',
+    xyz_file = xyzfile_qm_neu_2,
+    charge = 0,
+    mult = 2,
+    model_name = 'uma-m-1p1',
+    task_name = 'omol',
+    max_steps = 1000,
+    fmax = 0.02,
+    use_local_uma = True,
+    local_checkpoint = 'uma-m-1p1.pt',
 )
 
 QMRun.qm_gaussian(
-    work_dir = work_dir,
-    xyz_file = 'gaussian_top5.xyz',
+    work_dir = './',
+    xyz_file = xyzfile_uma_neg,
     gjf_filename = f'{poly_name}_oxid',
     charge = 0,
     mult = 2,

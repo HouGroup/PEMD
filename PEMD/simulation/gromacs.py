@@ -299,18 +299,19 @@ class PEMDGROMACS:
             file.write(file_contents)
         print(f"NPT anneal mdp file generation successful：{filename}\n")
 
-    def commands_pdbtogro(self, packmol_pdb,):
+    def commands_pdbtogro(self, packmol_pdb, *,  box_length: float | None = None,):
 
-        pdb_files = []
-        for com in self.compounds:
-            filepath = os.path.join(self.work_dir, f"{com}.pdb")
-            pdb_files.append(filepath)
+        if box_length is None:
+            pdb_files = []
+            for com in self.compounds:
+                filepath = os.path.join(self.work_dir, f"{com}.pdb")
+                pdb_files.append(filepath)
 
-        packmol_pdbpath = os.path.join(self.work_dir, packmol_pdb)
-        with open(packmol_pdbpath, "r") as f:
-            for line in f:
-                if line.startswith("CRYST1"):
-                    box_length = float(line[6:15]) / 10.0
+            packmol_pdbpath = os.path.join(self.work_dir, packmol_pdb)
+            with open(packmol_pdbpath, "r") as f:
+                for line in f:
+                    if line.startswith("CRYST1"):
+                        box_length = float(line[6:15]) / 10.0
 
         if self.gpu == True:
             self.commands = [
