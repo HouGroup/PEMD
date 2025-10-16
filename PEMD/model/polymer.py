@@ -81,17 +81,35 @@ def gen_sequence_copolymer_3D(name,
             dum1, dum2, atom1, atom2, smiles_mid = dumB1, dumB2, atomB1, atomB2, smiles_B
 
         mon, h, t = prepare_monomer_nocap(smiles_mid, dum1, dum2, atom1, atom2)
+        R_unit = _unit_bounding_radius(mon, h, skip_h=True)
 
         conf_poly = connecting_mol.GetConformer()
         tail_pos = np.array(conf_poly.GetAtomPosition(tail_idx))
 
         _, ideal_direction = get_vector(connecting_mol, tail_idx)
+        best_dir, best_offset, best_margin = _choose_extension_direction_and_offset(
+            connecting_mol=connecting_mol,
+            tail_idx=tail_idx,
+            base_dir=ideal_direction,
+            R_unit=R_unit,
+            bond_length=bond_length,
+        )
+        logger.debug(
+            "[direction] dir=(%.3f, %.3f, %.3f), offset=%.2f Å, margin=%.3f Å",
+            best_dir[0], best_dir[1], best_dir[2], best_offset, best_margin
+        )
 
         # 增加0.1 Å的额外距离以缓解关键基团过近的问题
-        target_pos = tail_pos + (bond_length + 0.12) * ideal_direction
+        # target_pos = tail_pos + (bond_length + 0.12) * ideal_direction
+        z_tail = int(connecting_mol.GetAtomWithIdx(tail_idx).GetAtomicNum())
+        z_head = int(mon.GetAtomWithIdx(h).GetAtomicNum())
+        bl_est = estimate_bond_length(z_tail, z_head, fallback=bond_length)
+        # target_pos = tail_pos + (bl_est + 0.12) * ideal_direction
+        target_pos = tail_pos + (bond_length + 0.12) * best_dir
 
         new_unit = Chem.Mol(mon)
-        new_unit = align_monomer_unit(new_unit, h, target_pos, ideal_direction)
+        # new_unit = align_monomer_unit(new_unit, h, target_pos, ideal_direction)
+        new_unit = align_monomer_unit(new_unit, h, target_pos, best_dir)
 
         # === 新增：围绕连接轴做确定性扭转扫描，最小化与现有聚合物的碰撞 ===
         new_unit, best_ang, best_off, best_pen = _torsion_place_without_clash(
@@ -99,7 +117,8 @@ def gen_sequence_copolymer_3D(name,
             new_unit=new_unit,
             tail_idx=tail_idx,
             unit_head_idx=h,
-            axis_dir=ideal_direction,
+            # axis_dir=ideal_direction,
+            axis_dir=best_dir,
             anchor=target_pos,
             angles=np.linspace(0, 2*np.pi, 60, endpoint=False),  # 稍细一些
             offsets=[0.0, 0.15, 0.30, 0.45]
@@ -125,8 +144,12 @@ def gen_sequence_copolymer_3D(name,
         place_h_in_tetrahedral(combined_mol, head_idx, h_indices)
 
         # local optimize
-        if has_overlapping_atoms(combined_mol):
+        # if has_overlapping_atoms(combined_mol):
+        #     combined_mol = local_optimize(combined_mol, maxIters=150)
+        tries = 0
+        while tries < 3 and has_overlapping_atoms(combined_mol):
             combined_mol = local_optimize(combined_mol, maxIters=150)
+            tries += 1
         connecting_mol = Chem.RWMol(combined_mol)
 
         tail_idx = num_atom + t
@@ -329,44 +352,42 @@ def _torsion_place_without_clash(connecting_mol: Chem.Mol,
     if angles is None:
         angles = np.linspace(0, 2*np.pi, 48, endpoint=False)
     if offsets is None:
-        offsets = [0.0, 0.15, 0.30, 0.45]  # Å，轻微拉开
+        offsets = [0.0, 0.15, 0.30, 0.45]
 
     # 聚合物 KDTree（排除尾原子本身，且忽略氢）
     poly_tree, poly_Z = _polymer_kdtree(connecting_mol, exclude_idx={tail_idx}, skip_h=True)
 
-    # 新单元：只绕 head 原子旋转其他原子
     rotatable = [j for j in range(new_unit.GetNumAtoms()) if j != unit_head_idx]
 
-    # 保留一份原始 3D 位置
+    # 保存“无偏移”的原始位置
     pos0 = _save_positions(new_unit)
 
-    best = (None, None, None, float("inf"))
+    best = (None, 0.0, 0.0, float("inf"))  # (best_pos, angle, offset, penalty)
     for off in offsets:
-        # 先应用轴向微移
+        # 先从原始位置恢复，再做“当前 offset”的一次性平移
         _restore_positions(new_unit, pos0)
-        if abs(off) > 1e-8:
-            rotate_substructure_around_axis(new_unit, [], axis_dir, anchor, 0.0)  # no-op，确保 conf 存在
+        if abs(off) > 1e-10:
             conf = new_unit.GetConformer()
             for i in range(new_unit.GetNumAtoms()):
                 p = np.array(conf.GetAtomPosition(i), dtype=float)
                 conf.SetAtomPosition(i, Point3D(*(p + axis_dir*off)))
+        offset_pos = _save_positions(new_unit)
 
         for ang in angles:
-            # 每个角度都从“当前 offset”的状态出发
-            _restore_positions(new_unit, _save_positions(new_unit))
+            _restore_positions(new_unit, offset_pos)
             rotate_substructure_around_axis(new_unit, rotatable, axis_dir, anchor, ang)
+
             pen = _clash_penalty_against_tree(new_unit, unit_head_idx, poly_tree, poly_Z)
             if pen < best[3]:
-                best = (_save_positions(new_unit), ang, off, pen)
+                best = (_save_positions(new_unit), float(ang), float(off), float(pen))
                 if pen == 0.0:
                     break
         if best[3] == 0.0:
             break
 
-    # 应用最佳姿态
     if best[0] is not None:
         _restore_positions(new_unit, best[0])
-    return new_unit, (best[1] or 0.0), (best[2] or 0.0), best[3]
+    return new_unit, best[1], best[2], best[3]
 
 def get_min_distance(mol, atom1, atom2, bond_graph, connected_distance=1.0, disconnected_distance=1.55):
     """
@@ -936,6 +957,9 @@ def gen_3D_withcap(mol, start_atom, end_atom, length, left_cap_smiles=None, righ
         capped_mol = attach_default_cap(capped_mol, terminal_idx)
 
     # 检查原子间距离是否合理
+    if has_overlapping_atoms(capped_mol):
+        logger.warning("Capped molecule has overlapping atoms; performing local optimization.")
+        capped_mol = local_optimize(capped_mol)
     valid_structure = check_3d_structure(capped_mol)
     if length <= 3 or valid_structure:
         return capped_mol

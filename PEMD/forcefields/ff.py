@@ -7,6 +7,7 @@ import parmed as pmd
 import importlib.resources as pkg_resources
 
 from rdkit import Chem
+from rdkit.Chem.rdchem import KekulizeException
 from pathlib import Path
 from foyer import Forcefield
 from collections import defaultdict
@@ -159,12 +160,65 @@ def gen_ff_from_data(work_dir, compound_name, corr_factor, target_sum_chg):
     scale_chg_itp(MD_dir, filename, corr_factor, target_sum_chg)
     # print(f"scale charge successfully.")
 
+def find_substruct_matches(target_mol, query_mol, *, uniquify=True):
+    """Return substructure matches with fallbacks for aromatic systems."""
+
+    if target_mol is None or query_mol is None:
+        return []
+
+    matches = list(target_mol.GetSubstructMatches(
+        query_mol,
+        uniquify=uniquify,
+        useChirality=False,
+    ))
+    if matches:
+        return matches
+
+    target_copy = Chem.Mol(target_mol)
+    query_copy = Chem.Mol(query_mol)
+
+    try:
+        Chem.Kekulize(target_copy, clearAromaticFlags=True)
+        Chem.Kekulize(query_copy, clearAromaticFlags=True)
+    except KekulizeException:
+        return matches
+
+    return list(target_copy.GetSubstructMatches(
+        query_copy,
+        uniquify=uniquify,
+        useChirality=False,
+    ))
+
+
+def select_non_overlapping_matches(matches, used_atoms=None):
+    """Select non-overlapping matches in a deterministic order."""
+
+    if not matches:
+        return []
+
+    if used_atoms is None:
+        used_atoms = set()
+    else:
+        used_atoms = set(used_atoms)
+
+    selected = []
+    for match in sorted(matches, key=lambda m: (min(m), m)):
+        if any(atom_idx in used_atoms for atom_idx in match):
+            continue
+        selected.append(match)
+        used_atoms.update(match)
+    return selected
+
 
 def assign_partial_charges(mol_poly, sub_mol, matches):
     """Assign partial charges from ``sub_mol`` to the corresponding atoms in ``mol_poly``."""
+    if sub_mol is None:
+        return
     for match in matches:
         for sub_atom_idx, poly_atom_idx in enumerate(match):
             sub_atom = sub_mol.GetAtomWithIdx(sub_atom_idx)
+            if not sub_atom.HasProp('partial_charge'):
+                continue
             charge = float(sub_atom.GetProp('partial_charge'))
             mol_poly.GetAtomWithIdx(poly_atom_idx).SetDoubleProp('partial_charge', charge)
 
@@ -186,6 +240,42 @@ def mol_to_charge_df(mol):
     df = df.sort_values('atom_index').reset_index(drop=True)
 
     return df
+
+def ensure_all_atoms_have_charges(mol):
+    """Ensure that every atom in ``mol`` has an assigned partial charge."""
+
+    def missing_atoms(current_mol):
+        return [atom.GetIdx() for atom in current_mol.GetAtoms()
+                if not atom.HasProp('partial_charge')]
+
+    missing = missing_atoms(mol)
+    if not missing:
+        return
+
+    # Propagate charges from neighbouring atoms first
+    for _ in range(3):
+        updated = False
+        still_missing = []
+        for atom_idx in missing:
+            atom = mol.GetAtomWithIdx(atom_idx)
+            neighbour_charges = [
+                neigh.GetDoubleProp('partial_charge')
+                for neigh in atom.GetNeighbors()
+                if neigh.HasProp('partial_charge')
+            ]
+            if neighbour_charges:
+                average_charge = sum(neighbour_charges) / len(neighbour_charges)
+                atom.SetDoubleProp('partial_charge', average_charge)
+                updated = True
+            else:
+                still_missing.append(atom_idx)
+        missing = still_missing
+        if not missing or not updated:
+            break
+
+    # Final fallback for any isolated atoms that still miss charges
+    for atom_idx in missing:
+        mol.GetAtomWithIdx(atom_idx).SetDoubleProp('partial_charge', 0.0)
 
 
 def apply_chg_to_poly(
@@ -217,7 +307,8 @@ def apply_chg_to_poly(
     left_matches = []
     rw_mol = Chem.RWMol(mol_poly)
     used_atoms = set()
-    all_left = list(rw_mol.GetSubstructMatches(left_mol, uniquify=True, useChirality=False))
+    # all_left = list(rw_mol.GetSubstructMatches(left_mol, uniquify=True, useChirality=False))
+    all_left = find_substruct_matches(rw_mol, left_mol)
 
     if all_left:
         left_match = min(all_left, key=lambda m: sum(m)/len(m))
@@ -228,7 +319,8 @@ def apply_chg_to_poly(
     # Match ``right_mol`` within ``mol_poly``
     right_matches = []
     rw_mol = Chem.RWMol(mol_poly)
-    all_right = list(rw_mol.GetSubstructMatches(right_mol, uniquify=True, useChirality=False))
+    # all_right = list(rw_mol.GetSubstructMatches(right_mol, uniquify=True, useChirality=False))
+    all_right = find_substruct_matches(rw_mol, right_mol)
     if all_right:
         right_match = max(all_right, key=lambda m: sum(m)/len(m))
         if not any(atom_idx in used_atoms for atom_idx in right_match):
@@ -242,15 +334,21 @@ def apply_chg_to_poly(
 
     # Match ``mid_mol`` to the repeating units in ``mol_poly`` and assign charges
     mid_matches = []
-    for match in rw_mol.GetSubstructMatches(mid_mol, uniquify=True, useChirality=False):
-        if any(atom_idx in used_atoms for atom_idx in match):
-            continue  # Skip overlapping matches
+    for match in select_non_overlapping_matches(
+            find_substruct_matches(rw_mol, mid_mol),
+            used_atoms,
+    ):
+    # for match in rw_mol.GetSubstructMatches(mid_mol, uniquify=True, useChirality=False):
+    #     if any(atom_idx in used_atoms for atom_idx in match):
+    #         continue  # Skip overlapping matches
         mid_matches.append(match)
         used_atoms.update(match)  # Mark atoms as used
     # print(f"Matches for mid_mol: {mid_matches}")
 
     # Assign partial charges to the ``mid_mol`` matches
     assign_partial_charges(mol_poly, mid_mol, mid_matches)
+
+    ensure_all_atoms_have_charges(mol_poly)
 
     # Extract the updated charges into a DataFrame
     charge_update_df = mol_to_charge_df(mol_poly)
