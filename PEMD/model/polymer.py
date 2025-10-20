@@ -9,7 +9,6 @@ import logging
 import numpy as np
 import pandas as pd
 import PEMD.io as io
-import networkx as nx
 import PEMD.constants as const
 
 from rdkit import Chem
@@ -26,6 +25,12 @@ from rdkit.Chem.rdchem import BondType
 from scipy.spatial.transform import Rotation as R
 
 
+from PEMD.model.build import (
+    gen_copolymer_3D,
+    mol_to_pdb,
+)
+
+
 lg = RDLogger.logger()
 lg.setLevel(RDLogger.ERROR)
 
@@ -39,11 +44,6 @@ if not logger.hasHandlers():
     logger.setLevel(logging.ERROR)
     logger.propagate = False
 
-# OpenBabel setup
-obConversion = ob.OBConversion()
-ff = ob.OBForceField.FindForceField('UFF')
-mol = ob.OBMol()
-np.set_printoptions(precision=20)
 
 def gen_sequence_copolymer_3D(name,
                               smiles_A,
@@ -51,7 +51,8 @@ def gen_sequence_copolymer_3D(name,
                               sequence,
                               bond_length=1.5,
                               left_cap_smiles=None,
-                              right_cap_smiles=None,):
+                              right_cap_smiles=None,
+                              retry_step=100):
     """
     通用序列构建：sequence 是一个列表，如 ['A','B','B','A',…]
     """
@@ -74,6 +75,7 @@ def gen_sequence_copolymer_3D(name,
     tail_idx = t_1
     num_atom = connecting_mol.GetNumAtoms()
 
+    k = 1
     for unit in sequence[1:]:
         if unit == 'A':
             dum1, dum2, atom1, atom2, smiles_mid = dumA1, dumA2, atomA1, atomA2, smiles_A
@@ -100,52 +102,59 @@ def gen_sequence_copolymer_3D(name,
         z_tail = int(connecting_mol.GetAtomWithIdx(tail_idx).GetAtomicNum())
         z_head = int(mon.GetAtomWithIdx(h).GetAtomicNum())
         bl_est = estimate_bond_length(z_tail, z_head, fallback=bond_length)
-        # target_pos = tail_pos + (bl_est + 0.12) * ideal_direction
-        target_pos = tail_pos + (bond_length + 0.12) * best_dir
+        target_pos = tail_pos + (bl_est + best_offset + 0.12) * best_dir
 
         new_unit = Chem.Mol(mon)
-        # new_unit = align_monomer_unit(new_unit, h, target_pos, ideal_direction)
         new_unit = align_monomer_unit(new_unit, h, target_pos, best_dir)
 
-        # === 新增：围绕连接轴做确定性扭转扫描，最小化与现有聚合物的碰撞 ===
-        new_unit, best_ang, best_off, best_pen = _torsion_place_without_clash(
-            connecting_mol=connecting_mol,
-            new_unit=new_unit,
-            tail_idx=tail_idx,
-            unit_head_idx=h,
-            axis_dir=best_dir,
-            anchor=target_pos,
-            angles=np.linspace(0, 2 * np.pi, 18, endpoint=False),
-            offsets=[0.0, 0.15, 0.30, 0.45],
-        )
+        for i in range(retry_step):
 
-        # （可留作兜底的小角度额外扰动；通常不再需要）
-        if has_overlapping_atoms(connecting_mol):
+            # === 新增：围绕连接轴做确定性扭转扫描，最小化与现有聚合物的碰撞 ===
+            new_unit, best_ang, best_off, best_pen = _torsion_place_without_clash(
+                connecting_mol=connecting_mol,
+                new_unit=new_unit,
+                tail_idx=tail_idx,
+                unit_head_idx=h,
+                axis_dir=best_dir,
+                anchor=target_pos,
+                angles=np.linspace(0, 2 * np.pi, 18, endpoint=False),
+                offsets=[0.0, 0.15, 0.30, 0.45],
+            )
+
             extra_angle = 0.10
             atom_indices_to_rotate = [j for j in range(new_unit.GetNumAtoms()) if j != h]
             rotate_substructure_around_axis(new_unit, atom_indices_to_rotate,
                                             ideal_direction, target_pos, extra_angle)
 
-        combined = Chem.CombineMols(connecting_mol, new_unit)
-        editable = Chem.EditableMol(combined)
-        head_idx = num_atom + h
-        editable.AddBond(tail_idx, head_idx, order=BondType.SINGLE)
+            combined = Chem.CombineMols(connecting_mol, new_unit)
+            editable = Chem.EditableMol(combined)
+            head_idx = num_atom + h
+            editable.AddBond(tail_idx, head_idx, order=Chem.rdchem.BondType.SINGLE)
 
-        combined_mol = editable.GetMol()
-        combined_mol = Chem.RWMol(combined_mol)
-        h_indices = [nbr.GetIdx() for nbr in combined_mol.GetAtomWithIdx(head_idx).GetNeighbors()
-                     if nbr.GetAtomicNum() == 1]
-        place_h_in_tetrahedral(combined_mol, head_idx, h_indices)
+            combined_mol = editable.GetMol()
+            combined_mol = Chem.RWMol(combined_mol)
 
-        # local optimize
-        # if has_overlapping_atoms(combined_mol):
-        #     combined_mol = local_optimize(combined_mol, maxIters=150)
-        tries = 0
-        while tries < 3 and has_overlapping_atoms(combined_mol):
-            combined_mol = local_optimize(combined_mol, maxIters=150)
-            tries += 1
+            h_indices = [nbr.GetIdx() for nbr in combined_mol.GetAtomWithIdx(head_idx).GetNeighbors()
+                         if nbr.GetAtomicNum() == 1]
+            place_h_in_tetrahedral(combined_mol, head_idx, h_indices)
+
+            combined_mol.UpdatePropertyCache(strict=False)
+            Chem.SanitizeMol(combined_mol)
+            AllChem.MMFFOptimizeMolecule(combined_mol, maxIters=100, confId=0)
+
+            if check_3d_structure(combined_mol):
+                print(check_3d_structure(combined_mol))
+                k += 1
+                mol_to_pdb(
+                    work_dir='./',
+                    mol=connecting_mol,
+                    name=name,
+                    resname='MOL',
+                    pdb_filename=f"{name}_{k}.pdb",
+                )
+                break
+
         connecting_mol = Chem.RWMol(combined_mol)
-
         tail_idx = num_atom + t
         num_atom = num_atom + new_unit.GetNumAtoms()
 
@@ -350,42 +359,6 @@ def get_min_distance(mol, atom1, atom2, bond_graph, connected_distance=1.0, disc
             return 1.6
         else:
             return disconnected_distance
-
-def has_overlapping_atoms(mol, connected_distance=1.0, disconnected_distance=1.56):
-    """
-    检查分子中是否存在原子重叠：
-      - 如果两个原子通过化学键相连，则允许的最小距离为 connected_distance
-      - 如果不相连，则默认使用 disconnected_distance，
-        如果任一原子为氧或卤素（F, Cl, Br, I）或两个原子均为碳，
-        则要求最小距离为 1.6 Å（你也可以修改为 2.1 Å，根据需要）。
-    当检测到原子对距离过近时，会输出相关信息，包括原子的名称。
-    """
-    # 获取所有原子的坐标
-    conf = mol.GetConformer()
-    positions = conf.GetPositions()
-
-    # 构建一个无向图来存储化学键连接关系
-    bond_graph = nx.Graph()
-    for i in range(mol.GetNumAtoms()):
-        bond_graph.add_node(i, position=positions[i])
-    for bond in mol.GetBonds():
-        atom1 = bond.GetBeginAtomIdx()
-        atom2 = bond.GetEndAtomIdx()
-        bond_graph.add_edge(atom1, atom2)
-
-    # 创建一个图用于存储重叠关系
-    G = nx.Graph()
-    num_atoms = mol.GetNumAtoms()
-    for i in range(num_atoms):
-        for j in range(i + 1, num_atoms):
-            distance = np.linalg.norm(positions[i] - positions[j])
-            actual_min = get_min_distance(mol, i, j, bond_graph,
-                                          connected_distance,
-                                          disconnected_distance)
-            if distance < actual_min:
-                G.add_edge(i, j, weight=distance)
-
-    return len(G.edges) > 0
 
 
 # Processes a polymer’s SMILES string with dummy atoms to set up connectivity and identify the connecting atoms.
@@ -693,36 +666,6 @@ def place_h_in_tetrahedral(mol, atom_idx, h_indices):
         conf.SetAtomPosition(h_indices[1], new_pos_2)
         return
 
-def local_optimize(mol, maxIters=100, num_retries=1000, perturbation=0.01):
-
-    for attempt in range(num_retries):
-        try:
-            mol.UpdatePropertyCache(strict=False)
-            _ = Chem.GetSymmSSSR(mol)
-
-            # 优化前检查是否有重叠原子
-            if has_overlapping_atoms(mol):
-                # logger.warning("\nMolecule has overlapping atoms, adjusting atomic positions.")
-                conf = mol.GetConformer()
-                for i in range(mol.GetNumAtoms()):
-                    pos = np.array(conf.GetAtomPosition(i))
-                    if mol.GetAtomWithIdx(i).GetAtomicNum() == 1:  # 仅调整氢原子
-                        conf.SetAtomPosition(i, pos + np.random.uniform(0.01, 1.8, size=3))
-
-            status = AllChem.MMFFOptimizeMolecule(mol, maxIters=maxIters)
-            if status < 0:
-                raise RuntimeError("MMFF optimization returned status %s" % status)
-            return mol  # 优化成功，返回分子
-
-        except Exception as e:
-            logger.warning(f"Local optimization attempt {attempt + 1} failed: {e}")
-            conf = mol.GetConformer()
-            for i in range(mol.GetNumAtoms()):
-                pos = np.array(conf.GetAtomPosition(i))
-                delta = np.random.uniform(-perturbation, perturbation, size=3)
-                conf.SetAtomPosition(i, pos + delta)
-    logger.error(f"Local optimization failed after {num_retries} attempts.")
-    return mol
 
 def rotate_vector_to_align(a, b):
     """
@@ -772,10 +715,7 @@ def estimate_bond_length(atom_num1: int, atom_num2: int, fallback: float = 1.5) 
     return float(length)
 
 
-def attach_fragment(base_mol: Chem.Mol,
-                    fragment: Chem.Mol,
-                    terminal_idx: int,
-                    fragment_connection_idx: int) -> Chem.Mol:
+def attach_fragment(base_mol, fragment, terminal_idx, fragment_connection_idx):
     n_base = base_mol.GetNumAtoms()
     combo = Chem.CombineMols(base_mol, fragment)
     ed = Chem.EditableMol(combo)
@@ -784,14 +724,17 @@ def attach_fragment(base_mol: Chem.Mol,
     combined = ed.GetMol()
 
     rw = Chem.RWMol(combined)
-    h_inds = [
-        nbr.GetIdx()
-        for nbr in rw.GetAtomWithIdx(new_idx).GetNeighbors()
-        if rw.GetAtomWithIdx(nbr.GetIdx()).GetAtomicNum() == 1
-    ]
+    h_inds = [nbr.GetIdx() for nbr in rw.GetAtomWithIdx(new_idx).GetNeighbors()
+              if rw.GetAtomWithIdx(nbr.GetIdx()).GetAtomicNum() == 1]
     if h_inds:
         place_h_in_tetrahedral(rw, new_idx, h_inds)
-    return rw.GetMol()
+
+    mol_out = rw.GetMol()
+    # 🔧 新增：更新缓存并消毒
+    mol_out.UpdatePropertyCache(strict=False)
+    Chem.SanitizeMol(mol_out)
+
+    return mol_out
 
 
 def attach_hydrogen_cap(base_mol: Chem.Mol, terminal_idx: int) -> Chem.Mol:
@@ -802,14 +745,16 @@ def attach_hydrogen_cap(base_mol: Chem.Mol, terminal_idx: int) -> Chem.Mol:
 
     editable_mol = Chem.EditableMol(base_mol)
     new_H_idx = editable_mol.AddAtom(Chem.Atom(1))
-    editable_mol.AddBond(
-        terminal_idx,
-        new_H_idx,
-        Chem.BondType.SINGLE,
-    )
+    editable_mol.AddBond(terminal_idx, new_H_idx, Chem.BondType.SINGLE)
     capped = editable_mol.GetMol()
+
     conformer = capped.GetConformer()
     conformer.SetAtomPosition(new_H_idx, Point3D(*H_pos))
+
+    # 🔧 关键补充：更新缓存并消毒
+    capped.UpdatePropertyCache(strict=False)
+    Chem.SanitizeMol(capped)
+
     return capped
 
 def attach_methyl_cap(base_mol: Chem.Mol, terminal_idx: int) -> Chem.Mol:
@@ -869,31 +814,32 @@ def attach_default_cap(base_mol: Chem.Mol, terminal_idx: int) -> Chem.Mol:
 
 
 def gen_3D_withcap(mol, start_atom, end_atom, length, left_cap_smiles=None, right_cap_smiles=None):
-
     capped_mol = Chem.Mol(mol)
-    terminal_data = [
-        (start_atom, left_cap_smiles),
-        (end_atom, right_cap_smiles),
-    ]
+    terminal_data = [(start_atom, left_cap_smiles), (end_atom, right_cap_smiles)]
 
     for terminal_idx, cap_smiles in terminal_data:
         if cap_smiles:
             try:
                 capped_mol = attach_custom_cap(capped_mol, terminal_idx, cap_smiles)
-                continue
             except ValueError as exc:
-                logger.error(
-                    "Failed to apply custom cap %s at atom %s: %s. Using default capping.",
-                    cap_smiles,
-                    terminal_idx,
-                    exc,
-                )
-        capped_mol = attach_default_cap(capped_mol, terminal_idx)
+                logger.error("Failed to apply custom cap %s at atom %s: %s. Using default capping.",
+                             cap_smiles, terminal_idx, exc)
+                capped_mol = attach_default_cap(capped_mol, terminal_idx)
+        else:
+            capped_mol = attach_default_cap(capped_mol, terminal_idx)
 
-    # 检查原子间距离是否合理
-    if has_overlapping_atoms(capped_mol):
-        # logger.warning("Capped molecule has overlapping atoms; performing local optimization.")
-        capped_mol = local_optimize(capped_mol)
+        # ✅ 每次加完一个帽，都立刻更新+消毒，避免后续步骤踩坑
+        try:
+            capped_mol.UpdatePropertyCache(strict=False)
+            Chem.SanitizeMol(capped_mol)
+        except Exception as exc:
+            logger.warning("Sanitization after capping terminal %s failed: %s", terminal_idx, exc)
+
+    # ✅ 在 MMFF 前再做一道保险
+    capped_mol.UpdatePropertyCache(strict=False)
+    Chem.SanitizeMol(capped_mol)
+
+    AllChem.MMFFOptimizeMolecule(capped_mol, maxIters=50, confId=0)
     valid_structure = check_3d_structure(capped_mol)
     if length <= 3 or valid_structure:
         return capped_mol
@@ -901,36 +847,87 @@ def gen_3D_withcap(mol, start_atom, end_atom, length, left_cap_smiles=None, righ
     logger.warning("Failed to generate the final PDB file.")
     return None
 
-def check_3d_structure(mol, confId=0, dist_min=0.7, bond_s=2.7, bond_a=1.9, bond_d=1.8, bond_t=1.4):
+def check_3d_structure(mol: Chem.Mol,
+                      confId: int = 0,
+                      dist_min: float = 0.7,
+                      bond_tol_low: float = 0.70,
+                      bond_tol_high: float = 1.30,
+                      nonbonded_scale: float = 0.80):
+    """
+    返回 (ok: bool, report: dict)
+    逐条检查：原子重合、全局过近、逐键合理范围、悬空氢、分片、严重非键碰撞。
+    """
+    conf = mol.GetConformer(confId)
+    coords = np.array(conf.GetPositions(), dtype=float)
+    D = model_lib.distance_matrix(coords).astype(float)
 
-    coord = np.array(mol.GetConformer(confId).GetPositions())
+    n = D.shape[0]
+    np.fill_diagonal(D, np.inf)  # 只改对角线
 
-    dist_matrix = model_lib.distance_matrix(coord)
-    dist_matrix = np.where(dist_matrix == 0, dist_min, dist_matrix)
+    # 0) 原子重合
+    if np.any(D < 1e-6):
+        i, j = np.unravel_index(np.argmin(D), D.shape)
+        return False
 
-    # Cheking bond length
-    bond_l_c = True
+    # 1) 全局最近距离
+    if np.min(D) < dist_min:
+        i, j = np.unravel_index(np.argmin(D), D.shape)
+        return False
+
+    # 2) 逐键合理区间（按共价半径和）
+    pt = Chem.GetPeriodicTable()
+
+    def ideal_len(i, j):
+        Zi = mol.GetAtomWithIdx(i).GetAtomicNum()
+        Zj = mol.GetAtomWithIdx(j).GetAtomicNum()
+        return (pt.GetRcovalent(Zi) + pt.GetRcovalent(Zj))
+
+    bad_bonds = []
     for b in mol.GetBonds():
-        bond_l = dist_matrix[b.GetBeginAtom().GetIdx(), b.GetEndAtom().GetIdx()]
-        if b.GetBondTypeAsDouble() == 1.0 and bond_l > bond_s:
-            bond_l_c = False
-            break
-        elif b.GetBondTypeAsDouble() == 1.5 and bond_l > bond_a:
-            bond_l_c = False
-            break
-        elif b.GetBondTypeAsDouble() == 2.0 and bond_l > bond_d:
-            bond_l_c = False
-            break
-        elif b.GetBondTypeAsDouble() == 3.0 and bond_l > bond_t:
-            bond_l_c = False
-            break
+        i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        dij = float(D[i, j])
+        L0 = float(ideal_len(i, j))
+        lo, hi = bond_tol_low * L0, bond_tol_high * L0
+        if not (lo <= dij <= hi):
+            bad_bonds.append((i, j, dij, lo, hi))
+    if bad_bonds:
+        return False
 
-    if dist_matrix.min() >= dist_min and bond_l_c:
-        check = True
-    else:
-        check = False
+    # 3) 悬空氢
+    dangling = [a.GetIdx() for a in mol.GetAtoms()
+                if a.GetAtomicNum() == 1 and a.GetDegree() != 1]
+    if dangling:
+        return False
 
-    return check
+    # 4) 是否分片
+    if len(Chem.GetMolFrags(mol)) > 1:
+        return False
+
+    # 5) 非键碰撞（VDW 尺度）
+    def vdw(Z: int):
+        return _vdw_radius(Z)  # 复用你上面的 VDW 表
+
+    bonded = {(min(b.GetBeginAtomIdx(), b.GetEndAtomIdx()),
+               max(b.GetBeginAtomIdx(), b.GetEndAtomIdx())) for b in mol.GetBonds()}
+
+    clashes = []
+    for i in range(n):
+        Zi = mol.GetAtomWithIdx(i).GetAtomicNum()
+        ri = vdw(Zi)
+        for j in range(i + 1, n):
+            if (i, j) in bonded: continue
+            Zj = mol.GetAtomWithIdx(j).GetAtomicNum()
+            rj = vdw(Zj)
+            cutoff = nonbonded_scale * (ri + rj)
+            dij = float(D[i, j])
+            if dij < cutoff:
+                clashes.append((i, j, dij, cutoff))
+                if len(clashes) >= 20: break
+        if len(clashes) >= 20: break
+    if clashes:
+        return False
+
+    return True
 
 def calculate_box_size(numbers, pdb_files, density):
     total_mass = 0
@@ -1123,8 +1120,6 @@ def _torsion_place_without_clash(connecting_mol: Chem.Mol,
                 rbonds = _local_rotatable_bonds(new_unit, unit_head_idx, max_hops=2)
                 conf = new_unit.GetConformer()
                 if rbonds:
-                    # 取每根的一个参考四元组（简单找各端相邻原子）
-                    from rdkit.Chem import rdmolops
                     for (i,j) in rbonds:
                         # 选 i 的一个邻居 k（非 j），j 的一个邻居 l（非 i）
                         ni = [a.GetIdx() for a in new_unit.GetAtomWithIdx(i).GetNeighbors() if a.GetIdx()!=j]
@@ -1250,3 +1245,8 @@ def _placement_penalty(new_unit: Chem.Mol,
         penalty += plane_weight * float(d2)
 
     return penalty
+
+
+
+
+
