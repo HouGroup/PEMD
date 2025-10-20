@@ -634,7 +634,8 @@ class PEMDAnalysis:
                 (
                     match_list,
                     start_atom,
-                    end_atom
+                    end_atom,
+                    mol
                 ) = find_poly_match_subindex(
                     poly_name,
                     repeating_unit,

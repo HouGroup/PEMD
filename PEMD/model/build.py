@@ -9,7 +9,7 @@ Date: 2024.01.18
 import random
 from pathlib import Path
 
-from PEMD import io
+from rdkit.Chem import AllChem
 from rdkit import Chem
 from PEMD.model import polymer
 from rdkit.Chem import Descriptors
@@ -64,13 +64,82 @@ def gen_copolymer_3D(smiles_A,
         right_cap_smiles=right_cap_smiles,
     )
 
-
-def mol_to_pdb(work_dir, mol, name, resname, pdb_filename):
+def mol_to_pdb(
+    work_dir,
+    mol: Chem.Mol,
+    name: str,
+    resname: str,
+    pdb_filename: str,
+    *,
+    conf_id: int = 0,
+    chain_id: str = "A",
+    residue_number: int = 1,
+    hetatm: bool = False,
+    also_write_sdf: bool = False,
+    also_write_mol2: bool = False,
+):
+    """
+    直接把 RDKit Mol 写成 PDB，并显式写出 CONECT（保存键连）。
+    同时可选写出 SDF/MOL2 来保留键级/芳香性等完整信息。
+    """
     work_path = Path(work_dir)
+    work_path.mkdir(parents=True, exist_ok=True)
     pdb_file = work_path / pdb_filename
-    Chem.MolToXYZFile(mol, 'mid.xyz', confId=0)
-    io.convert_xyz_to_pdb('mid.xyz', pdb_file, name, resname)
-    Path("mid.xyz").unlink(missing_ok=True)
+
+    # 1) 确保有 3D 构象（LigParGen/MD 通常需要）
+    m = Chem.Mol(mol)  # 复制，避免修改原对象
+    if m.GetNumConformers() == 0:
+        m = Chem.AddHs(m, addCoords=True)
+        AllChem.EmbedMolecule(m, AllChem.ETKDG())
+        try:
+            AllChem.UFFOptimizeMolecule(m)
+        except Exception:
+            pass  # 有些体系 UFF 不稳定，忽略即可
+    # 设置分子名
+    m.SetProp("_Name", name)
+
+    # 2) 给每个原子设置 PDB Residue/Atom 信息（PDB 字段更规范）
+    resname = (resname or "MOL")[:3].upper()
+    for i, atom in enumerate(m.GetAtoms()):
+        # PDB 原子名字段宽度为 4；右对齐更标准
+        atom_name = (atom.GetSymbol() + str((i+1) % 10000)).rjust(4)
+        info = Chem.AtomPDBResidueInfo(
+            atomName=atom_name,
+            residueName=resname,
+            residueNumber=residue_number,
+            chainId=(chain_id or "A"),
+            isHeteroAtom=bool(hetatm),
+        )
+        atom.SetMonomerInfo(info)
+
+    # 3) 直接由 RDKit 写 PDB（包含坐标、残基、链等）
+    Chem.MolToPDBFile(m, str(pdb_file), confId=conf_id)
+
+    # 4) 确保写出 CONECT（显式保存“有哪些键”）
+    #    某些 RDKit 版本/风味不一定自动写全，这里手动补齐。
+    text = Path(pdb_file).read_text()
+    if "CONECT" not in text:
+        with open(pdb_file, "a") as fh:
+            for b in m.GetBonds():
+                i = b.GetBeginAtomIdx() + 1  # PDB 原子序号从 1 开始
+                j = b.GetEndAtomIdx() + 1
+                fh.write(f"CONECT{i:>5}{j:>5}\n")
+        # PDB 规范以 END 结尾（RDKit 已写 END，若你补了 CONECT，最好再补一个 END）
+        with open(pdb_file, "a") as fh:
+            fh.write("END\n")
+
+    # 5) 可选：同时写 SDF（完整保留键级/芳香性）或 MOL2（某些工具喜欢）
+    if also_write_sdf:
+        sdf_path = work_path / (Path(pdb_filename).with_suffix(".sdf").name)
+        Chem.MolToMolFile(m, str(sdf_path), confId=conf_id)
+    if also_write_mol2:
+        mol2_path = work_path / (Path(pdb_filename).with_suffix(".mol2").name)
+        try:
+            Chem.MolToMol2File(m, str(mol2_path), confId=conf_id)
+        except Exception:
+            pass  # 旧版 RDKit 可能没有 Mol2 写出，忽略即可
+
+    return str(pdb_file)
 
 
 def calc_poly_chains(num_Li_salt , conc_Li_salt, mass_per_chain):

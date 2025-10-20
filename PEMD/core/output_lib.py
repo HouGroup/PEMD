@@ -96,7 +96,7 @@ def print_pemd_info(
     version: Optional[str] = None,
     project_name: str = "Polymer Electrolyte Modeling & Discovery (PEMD)",
     org_1: str = "Institute of Materials Research (iMR), Tsinghua SIGS, Shenzhen, China",
-    org_2: str = "School of Materials Science and Engineering, Tsinghua University, Beijing, China",
+    # org_2: str = "School of Materials Science and Engineering, Tsinghua University, Beijing, China",
     cite_lines: Tuple[str, ...] = (
         "S. Tan, T. Hou*, et al., PEMD: An open-source framework for",
         "high-throughput simulation and analysis of polymer electrolytes,",
@@ -154,7 +154,7 @@ def print_pemd_info(
     lines.append(_center(title, width))
     lines.append(_center(f"{ansi.dim}Developed at Hou Group{ansi.reset}", width))
     lines.append(_center(f"{ansi.cyan}{org_1}{ansi.reset}", width))
-    lines.append(_center(f"{ansi.cyan}{org_2}{ansi.reset}", width))
+    # lines.append(_center(f"{ansi.cyan}{org_2}{ansi.reset}", width))
     lines.append(_center(" ", width))
 
     lines.append(_center(f"{ansi.bold}Cite this work as:{ansi.reset}", width))

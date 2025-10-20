@@ -463,8 +463,18 @@ def get_cluster_index(
         closest_select_atom = select_atoms_list[min_dist_idx]
 
         # Identify the non-hydrogen neighbor bonded to the closest selected atom
-        bonded_c = [nbr for nbr in closest_select_atom.GetNeighbors() if nbr.GetSymbol() != 'H']
-        c_idx_list = [bonded_c[0].GetIdx()]
+        try:
+            Chem.FastFindRings(mol)
+        except Exception:
+            pass
+        bonded_heavy = [nbr for nbr in closest_select_atom.GetNeighbors()
+                        if nbr.GetAtomicNum() > 1]
+        if closest_select_atom.IsInRing() and len(bonded_heavy) >= 2:
+            c_idx_list = [bonded_heavy[0].GetIdx(), bonded_heavy[1].GetIdx()]
+        elif bonded_heavy:
+            c_idx_list = [bonded_heavy[0].GetIdx()]
+        else:
+            c_idx_list = [closest_select_atom.GetIdx()]
     else:
         center_atom_indices = {n_idx}
         threshold = distance_dict[poly_name]
@@ -494,60 +504,273 @@ def get_cluster_index(
     return sorted(c_idx_list), sorted(center_atom_indices), sorted(selected_atom_indices), sorted(other_atom_indices)
 
 
-def find_poly_match_subindex(poly_name, repeating_unit, length, mol, selected_atom_idxs, c_idx_list, ):
+# def find_poly_match_subindex(poly_name, repeating_unit, length, mol, selected_atom_idxs, c_idx_list, ):
+#
+#     (
+#         dum1,
+#         dum2,
+#         atom1,
+#         atom2,
+#     ) = polymer.Init_info(
+#         poly_name,
+#         repeating_unit,
+#     )
+#
+#     (
+#         inti_mol3,
+#         monomer_mol,
+#         start_atom,
+#         end_atom,
+#     ) = model_lib.gen_smiles_nocap(
+#         dum1,
+#         dum2,
+#         atom1,
+#         atom2,
+#         repeating_unit,
+#         length,
+#     )
+#     main_smi = Chem.MolToSmiles(inti_mol3, canonical=False)
+#     mol_test = Chem.MolFromSmiles(main_smi)
+#
+#     # Collect the indices of all neighbors of ``*`` atoms in a single comprehension
+#     connected_idxs = [
+#         nbr.GetIdx()
+#         for atom in mol_test.GetAtoms() if atom.GetSymbol() == '*'
+#         for nbr in atom.GetNeighbors()
+#     ]
+#     main_smi_with_h1 = main_smi.replace('*', '[H]')
+#     main_mol_with_h1 = Chem.MolFromSmiles(main_smi_with_h1)
+#
+#     main_mol = Chem.RemoveHs(main_mol_with_h1)
+#     main_smi = Chem.MolToSmiles(main_mol, canonical=False)
+#
+#     mol1 = Chem.MolFromSmiles(main_smi)
+#     rw_mol = Chem.RWMol(mol1)
+#     for bond in rw_mol.GetBonds():
+#         bond.SetBondType(Chem.BondType.SINGLE)
+#
+#     mol2 = rw_mol.GetMol()
+#     smi2 = Chem.MolToSmiles(mol2, canonical=False)
+#     pattern = Chem.MolFromSmiles(smi2)
+#     matches = _plainize_mol(mol).GetSubstructMatches(_plainize_mol(pattern), useChirality=False)
+#     print(pattern)
+#
+#     best = pick_most_central_match(matches, c_idx_list, selected_atom_idxs)
+#     if best is not None:
+#         # return list(best), connected_idxs[0], connected_idxs[1]-1
+#         return list(best), start_atom, connected_idxs[1]-1
+from rdkit import Chem
+import numpy as np
 
-    (
-        dum1,
-        dum2,
-        atom1,
-        atom2,
-    ) = polymer.Init_info(
-        poly_name,
-        repeating_unit,
+def _plainize_mol(m: Chem.Mol) -> Chem.Mol:
+    m2 = Chem.Mol(m)
+    try:
+        Chem.Kekulize(m2, clearAromaticFlags=True)
+    except Exception:
+        pass
+    for b in m2.GetBonds():
+        b.SetBondType(Chem.BondType.SINGLE)
+        b.SetIsAromatic(False)
+    for a in m2.GetAtoms():
+        a.SetIsAromatic(False)
+    return m2
+
+def _promote_bonds_on_parent(parent: Chem.Mol, match_list, templ: Chem.Mol) -> Chem.Mol:
+    """
+    将模板 templ（严格键级/芳香）的键型映射到 parent 的匹配子图（按 match_list 对齐），
+    仅改子图内的键；返回一个新的 mol（不原地改）。
+    """
+    ed = Chem.RWMol(parent)
+    # 给模板做一次 Kekulize，保证芳香能被合理转写
+    t2 = Chem.Mol(templ)
+    try:
+        Chem.Kekulize(t2, clearAromaticFlags=False)
+    except Exception:
+        pass
+    # 逐键映射
+    for b in t2.GetBonds():
+        i = b.GetBeginAtomIdx()
+        j = b.GetEndAtomIdx()
+        mi = int(match_list[i]); mj = int(match_list[j])
+        bond = ed.GetBondBetweenAtoms(mi, mj)
+        if bond is None:
+            continue
+        bond.SetBondType(b.GetBondType())
+        bond.SetIsAromatic(b.GetIsAromatic())
+    out = ed.GetMol()
+    # 让 RDKit 重新做价态/芳香性判断
+    try:
+        Chem.SanitizeMol(out)
+    except Exception:
+        # 局部不一致也尽量忽略，让严格匹配再检验
+        pass
+    return out
+
+def _has_aromatic_6ring(m: Chem.Mol) -> bool:
+    """模板中是否含芳香 6 元环（决定分支策略）"""
+    try:
+        Chem.FastFindRings(m)
+    except Exception:
+        pass
+    ri = m.GetRingInfo()
+    # 只要存在 6 元环且该环中有 >=4 个芳香原子/或任一键芳香即认为“苯环模式”
+    for ids in ri.AtomRings():
+        if len(ids) == 6:
+            arom_atoms = sum(1 for i in ids if m.GetAtomWithIdx(i).GetIsAromatic())
+            if arom_atoms >= 4:
+                return True
+            # 或者看环内是否有芳香键
+            bonds = []
+            for i in range(6):
+                a = ids[i]; b = ids[(i+1) % 6]
+                bd = m.GetBondBetweenAtoms(a, b)
+                if bd is not None and bd.GetIsAromatic():
+                    return True
+    return False
+
+def find_poly_match_subindex(
+    poly_name,
+    repeating_unit,
+    length,
+    mol,
+    selected_atom_idxs,
+    c_idx_list,
+):
+    # === 1) 生成含 '*' 的主链（严格模板起点） ===
+    dum1, dum2, atom1, atom2 = polymer.Init_info(poly_name, repeating_unit)
+    inti_mol3, monomer_mol, _sa, _ea = model_lib.gen_smiles_nocap(
+        dum1, dum2, atom1, atom2, repeating_unit, length,
     )
+    main_smi_star = Chem.MolToSmiles(inti_mol3, canonical=False)
+    if not main_smi_star:
+        raise ValueError("模板 SMILES 为空")
 
-    (
-        inti_mol3,
-        monomer_mol,
-        start_atom,
-        end_atom,
-    ) = model_lib.gen_smiles_nocap(
-        dum1,
-        dum2,
-        atom1,
-        atom2,
-        repeating_unit,
-        length,
-    )
-    main_smi = Chem.MolToSmiles(inti_mol3, canonical=False)
-    mol_test = Chem.MolFromSmiles(main_smi)
+    # === 2) 把 '*' 显式为 '[*]'，给端点邻居打标（101/102），删除哑原子 ===
+    pat_star = Chem.MolFromSmiles(main_smi_star.replace("*","[*]"))
+    if pat_star is None:
+        raise ValueError(f"无法解析模板：{main_smi_star}")
 
-    # Collect the indices of all neighbors of ``*`` atoms in a single comprehension
-    connected_idxs = [
-        nbr.GetIdx()
-        for atom in mol_test.GetAtoms() if atom.GetSymbol() == '*'
-        for nbr in atom.GetNeighbors()
-    ]
-    main_smi_with_h1 = main_smi.replace('*', '[H]')
-    main_mol_with_h1 = Chem.MolFromSmiles(main_smi_with_h1)
+    dummy_idxs = [a.GetIdx() for a in pat_star.GetAtoms() if a.GetAtomicNum()==0]
+    end_neighbors = []
+    for di in dummy_idxs:
+        for nb in pat_star.GetAtomWithIdx(di).GetNeighbors():
+            if nb.GetAtomicNum() > 1:
+                end_neighbors.append(nb.GetIdx())
+    end_neighbors = list(dict.fromkeys(end_neighbors))[:2]
+    if len(end_neighbors) < 2:
+        heavy = [a.GetIdx() for a in pat_star.GetAtoms() if a.GetAtomicNum()>1]
+        if len(heavy) >= 2:
+            end_neighbors = [heavy[0], heavy[-1]]
+        else:
+            raise ValueError("模板端点邻居识别失败")
 
-    main_mol = Chem.RemoveHs(main_mol_with_h1)
-    main_smi = Chem.MolToSmiles(main_mol, canonical=False)
+    pat_star.GetAtomWithIdx(end_neighbors[0]).SetAtomMapNum(101)
+    pat_star.GetAtomWithIdx(end_neighbors[1]).SetAtomMapNum(102)
 
-    mol1 = Chem.MolFromSmiles(main_smi)
-    rw_mol = Chem.RWMol(mol1)
-    for bond in rw_mol.GetBonds():
-        bond.SetBondType(Chem.BondType.SINGLE)
+    em = Chem.RWMol(pat_star)
+    for di in sorted(dummy_idxs, reverse=True):
+        em.RemoveAtom(di)
+    pattern_strict = em.GetMol()               # 带正确键级/芳香（严格用）
+    pattern_plain  = _plainize_mol(pattern_strict)  # 纯拓扑（先定位）
 
-    mol2 = rw_mol.GetMol()
-    smi2 = Chem.MolToSmiles(mol2, canonical=False)
-    pattern = Chem.MolFromSmiles(smi2)
-    matches = mol.GetSubstructMatches(pattern, uniquify=True)
+    # 记录 pattern 中端点的位置
+    pat_idx_start = pat_idx_end = None
+    for ai, a in enumerate(pattern_strict.GetAtoms()):
+        amap = a.GetAtomMapNum()
+        if   amap == 101: pat_idx_start = ai
+        elif amap == 102: pat_idx_end   = ai
+    if pat_idx_start is None or pat_idx_end is None:
+        raise ValueError("未找到模板端点标记 101/102")
 
-    best = pick_most_central_match(matches, c_idx_list, selected_atom_idxs)
-    if best is not None:
-        # return list(best), connected_idxs[0], connected_idxs[1]-1
-        return list(best), start_atom, connected_idxs[1]-1
+    # === 3) 纯拓扑匹配先定位 ===
+    target_plain = _plainize_mol(mol)
+    matches_plain = target_plain.GetSubstructMatches(pattern_plain, useChirality=False)
+    if not matches_plain:
+        raise ValueError("纯拓扑匹配为 0 —— 模板与目标拓扑不一致")
+
+    anchors = set(c_idx_list)
+    allowed0 = set(selected_atom_idxs) if selected_atom_idxs else set(range(mol.GetNumAtoms()))
+    is_aromatic = _has_aromatic_6ring(pattern_strict)
+
+    # 打分函数：锚点“中心性”（越靠 pattern 中心越好）
+    def center_score(m):
+        L = len(m); center = (L-1)/2
+        pos = sorted([m.index(a) for a in anchors if a in m])
+        if not pos: return 1e9
+        return abs(pos[len(pos)//2] - center)
+
+    # 几何就近打分：匹配原子到锚点集合的最小距离之和
+    conf = mol.GetConformer()
+    def _p(idx):
+        p = conf.GetAtomPosition(int(idx))
+        return np.array([p.x, p.y, p.z], dtype=float)
+    def geo_score(m):
+        if not anchors: return 0.0
+        s = 0.0
+        for i in m:
+            p = _p(i)
+            dmin = min(np.linalg.norm(p - _p(a)) for a in anchors)
+            s += dmin
+        return s
+
+    M = [list(m) for m in matches_plain]
+
+    # === 3a) 分支策略：苯环 vs 非苯环 ===
+    cand = []
+    if is_aromatic:
+        # 苯环：优先强约束（全部锚点 + 允许集）
+        filters = [
+            (lambda m,allowed: anchors.issubset(set(m)) and all(i in allowed for i in m), allowed0),
+            (lambda m,allowed: anchors.issubset(set(m)),                                      None),
+            (lambda m,allowed: any(a in m for a in anchors) and all(i in allowed for i in m), allowed0),
+            (lambda m,allowed: any(a in m for a in anchors),                                  None),
+        ]
+    else:
+        # 非苯环：更宽松（至少一个锚点起步）
+        filters = [
+            (lambda m,allowed: any(a in m for a in anchors) and all(i in allowed for i in m), allowed0),
+            (lambda m,allowed: any(a in m for a in anchors),                                  None),
+            (lambda m,allowed: all(i in allowed for i in m),                                   allowed0),
+        ]
+    for pred, allowed in filters:
+        if allowed is None:
+            tmp = [m for m in M if pred(m, set())]
+        else:
+            tmp = [m for m in M if pred(m, allowed)]
+        if tmp:
+            cand = tmp
+            break
+    if not cand:
+        cand = M  # 实在不行：全量候选
+
+    # 选最好：优先中心性，若无锚点则用几何就近
+    if any(a in cand[0] for a in anchors):
+        best = min(cand, key=center_score)
+    else:
+        best = min(cand, key=geo_score)
+
+    # === 4) 回填严格键级/芳香，做严格匹配验证 ===
+    mol_strict = _promote_bonds_on_parent(mol, best, pattern_strict)
+    strict_hits = mol_strict.GetSubstructMatches(pattern_strict, useChirality=False)
+    if not strict_hits:
+        # 再试一次 Kekulize 模板
+        pat_k = Chem.Mol(pattern_strict)
+        try:
+            Chem.Kekulize(pat_k, clearAromaticFlags=False)
+        except Exception:
+            pass
+        strict_hits = mol_strict.GetSubstructMatches(pat_k, useChirality=False)
+
+    if not strict_hits:
+        return best, pat_idx_start, pat_idx_end, mol
+
+    # 选择与 best 重叠最多的严格匹配，避免落到其它重复单元
+    def overlap_score(hit):  # 越大越好 → 用负号
+        return -len(set(hit) & set(best))
+    strict_best = min(strict_hits, key=overlap_score)
+    best = list(strict_best)
+
+    return best, pat_idx_start, pat_idx_end, mol_strict
 
 
 def pick_most_central_match(matches, c_idx_list, selected_atom_idxs):

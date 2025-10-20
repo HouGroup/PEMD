@@ -94,10 +94,6 @@ def gen_sequence_copolymer_3D(name,
             R_unit=R_unit,
             bond_length=bond_length,
         )
-        logger.debug(
-            "[direction] dir=(%.3f, %.3f, %.3f), offset=%.2f Å, margin=%.3f Å",
-            best_dir[0], best_dir[1], best_dir[2], best_offset, best_margin
-        )
 
         # 增加0.1 Å的额外距离以缓解关键基团过近的问题
         # target_pos = tail_pos + (bond_length + 0.12) * ideal_direction
@@ -117,13 +113,11 @@ def gen_sequence_copolymer_3D(name,
             new_unit=new_unit,
             tail_idx=tail_idx,
             unit_head_idx=h,
-            # axis_dir=ideal_direction,
             axis_dir=best_dir,
             anchor=target_pos,
-            angles=np.linspace(0, 2*np.pi, 60, endpoint=False),  # 稍细一些
-            offsets=[0.0, 0.15, 0.30, 0.45]
+            angles=np.linspace(0, 2 * np.pi, 18, endpoint=False),
+            offsets=[0.0, 0.15, 0.30, 0.45],
         )
-        logger.debug(f"[place] angle={best_ang:.3f} rad, offset={best_off:.2f} Å, penalty={best_pen:.4f}")
 
         # （可留作兜底的小角度额外扰动；通常不再需要）
         if has_overlapping_atoms(connecting_mol):
@@ -268,31 +262,23 @@ def _choose_extension_direction_and_offset(connecting_mol: Chem.Mol,
                                            lookahead: float = 1.2,
                                            allow_offsets: tuple[float,...] = (0.0, 0.2, 0.4, 0.6),
                                            cone_half_deg: float = 30.0) -> tuple[np.ndarray, float, float]:
-    """
-    先在圆锥内选“最宽敞”的方向；若该方向最近裕度<0，则允许增加少量轴向 offset 再评估。
-    返回：(best_dir, best_offset, best_margin)
-    """
     conf = connecting_mol.GetConformer()
     tail_pos = np.array(conf.GetAtomPosition(tail_idx), dtype=float)
     poly_tree, poly_Z = _polymer_kdtree(connecting_mol, exclude_idx={tail_idx}, skip_h=True)
 
-    dirs = _directions_in_cone(base_dir, half_deg=cone_half_deg, n_phi=12)
+    dirs = _directions_in_cone_fibonacci(base_dir, half_deg=cone_half_deg, n=96)
+    dirs = _early_clearance_prune(connecting_mol, tail_idx, R_unit, dirs, bond_length,
+                                  lookahead=0.8, samples=4, min_margin=0.0)
 
     best = (dirs[0], 0.0, -1e9)
     for d in dirs:
         for off in allow_offsets:
-            margin = _direction_clearance_score(
-                poly_tree, poly_Z, tail_pos, d,
-                R_unit=R_unit,
-                s_start=bond_length + off,
-                s_window=max(lookahead, 0.6),  # 前方再看 ~1 Å
-                n_samples=8, scale=0.85,
-            )
-            # 目标：最大化最小裕度
+            margin = _direction_clearance_score(poly_tree, poly_Z, tail_pos, d,
+                                                R_unit=R_unit, s_start=bond_length+off,
+                                                s_window=max(lookahead, 0.6), n_samples=8, scale=0.85)
             if margin > best[2] or (np.isclose(margin, best[2]) and off < best[1]):
                 best = (d, off, margin)
-
-    return best  # (best_dir, best_offset, best_margin)
+    return best
 
 def _save_positions(mol: Chem.Mol):
     conf = mol.GetConformer()
@@ -336,58 +322,6 @@ def _clash_penalty_against_tree(new_unit: Chem.Mol,
             if d < rmin:
                 penalty += (rmin - d)**2
     return penalty
-
-def _torsion_place_without_clash(connecting_mol: Chem.Mol,
-                                 new_unit: Chem.Mol,
-                                 tail_idx: int,
-                                 unit_head_idx: int,
-                                 axis_dir: np.ndarray,
-                                 anchor: np.ndarray,
-                                 angles: np.ndarray | None = None,
-                                 offsets: list[float] | None = None) -> tuple[Chem.Mol, float, float, float]:
-    """
-    围绕连接轴对新单元做扭转扫描 + 轻微轴向位移，选择碰撞代价最小的姿态。
-    返回：(优化后 new_unit, best_angle, best_offset, best_penalty)
-    """
-    if angles is None:
-        angles = np.linspace(0, 2*np.pi, 48, endpoint=False)
-    if offsets is None:
-        offsets = [0.0, 0.15, 0.30, 0.45]
-
-    # 聚合物 KDTree（排除尾原子本身，且忽略氢）
-    poly_tree, poly_Z = _polymer_kdtree(connecting_mol, exclude_idx={tail_idx}, skip_h=True)
-
-    rotatable = [j for j in range(new_unit.GetNumAtoms()) if j != unit_head_idx]
-
-    # 保存“无偏移”的原始位置
-    pos0 = _save_positions(new_unit)
-
-    best = (None, 0.0, 0.0, float("inf"))  # (best_pos, angle, offset, penalty)
-    for off in offsets:
-        # 先从原始位置恢复，再做“当前 offset”的一次性平移
-        _restore_positions(new_unit, pos0)
-        if abs(off) > 1e-10:
-            conf = new_unit.GetConformer()
-            for i in range(new_unit.GetNumAtoms()):
-                p = np.array(conf.GetAtomPosition(i), dtype=float)
-                conf.SetAtomPosition(i, Point3D(*(p + axis_dir*off)))
-        offset_pos = _save_positions(new_unit)
-
-        for ang in angles:
-            _restore_positions(new_unit, offset_pos)
-            rotate_substructure_around_axis(new_unit, rotatable, axis_dir, anchor, ang)
-
-            pen = _clash_penalty_against_tree(new_unit, unit_head_idx, poly_tree, poly_Z)
-            if pen < best[3]:
-                best = (_save_positions(new_unit), float(ang), float(off), float(pen))
-                if pen == 0.0:
-                    break
-        if best[3] == 0.0:
-            break
-
-    if best[0] is not None:
-        _restore_positions(new_unit, best[0])
-    return new_unit, best[1], best[2], best[3]
 
 def get_min_distance(mol, atom1, atom2, bond_graph, connected_distance=1.0, disconnected_distance=1.55):
     """
@@ -648,7 +582,7 @@ def get_vector(mol, index):
     avg = np.mean(vecs, axis=0)
     norm_avg = np.linalg.norm(avg)
     if norm_avg < const.MIN_DIRECTION_NORM:
-        logger.warning("Atom %s: Computed local direction norm too small (%.3f); using default.", index, norm_avg)
+        # logger.warning("Atom %s: Computed local direction norm too small (%.3f); using default.", index, norm_avg)
         return pos, const.DEFAULT_DIRECTION
     return pos, avg / norm_avg
 
@@ -958,7 +892,7 @@ def gen_3D_withcap(mol, start_atom, end_atom, length, left_cap_smiles=None, righ
 
     # 检查原子间距离是否合理
     if has_overlapping_atoms(capped_mol):
-        logger.warning("Capped molecule has overlapping atoms; performing local optimization.")
+        # logger.warning("Capped molecule has overlapping atoms; performing local optimization.")
         capped_mol = local_optimize(capped_mol)
     valid_structure = check_3d_structure(capped_mol)
     if length <= 3 or valid_structure:
@@ -1060,5 +994,259 @@ def calc_mol_weight(pdb_file):
             raise ValueError(f"无法计算分子量，PDB 文件: {pdb_file}，错误: {e}")
 
 
+# === 新增：等面积 Fibonacci 球面采样 + 圆锥过滤 ===
+def _fibonacci_sphere(n=64):
+    import numpy as np
+    phi = (1 + 5**0.5) / 2
+    i = np.arange(n)
+    z = 1 - 2*(i + 0.5)/n
+    r = np.sqrt(np.maximum(0.0, 1 - z*z))
+    theta = 2*np.pi*i/phi
+    x, y = r*np.cos(theta), r*np.sin(theta)
+    return np.vstack([x, y, z]).T
+
+def _directions_in_cone_fibonacci(base_dir: np.ndarray, half_deg: float = 30.0, n: int = 96):
+    base = base_dir / (np.linalg.norm(base_dir) + 1e-12)
+    cands = _fibonacci_sphere(n)
+    cos_half = np.cos(np.deg2rad(half_deg))
+    dots = cands @ base
+    mask = dots >= cos_half
+    # 保留圆锥内方向，并且把 base_dir 本身放在第一位
+    dirs = [base.copy()]
+    if mask.any():
+        sel = cands[mask]
+        # 简单按与 base_dir 的点积降序（更贴近基向量）
+        order = np.argsort(-(sel @ base))
+        dirs += [d/np.linalg.norm(d) for d in sel[order]]
+    return dirs
+
+# === 新增：极快粗判（包围球路径上的最小裕度）===
+def _early_clearance_prune(connecting_mol: Chem.Mol, tail_idx: int, R_unit: float,
+                           dirs: list[np.ndarray], bond_length: float,
+                           lookahead: float = 1.0, samples: int = 4, scale: float = 0.85,
+                           min_margin: float = 0.0):
+    tree, Z = _polymer_kdtree(connecting_mol, exclude_idx={tail_idx}, skip_h=True)
+    conf = connecting_mol.GetConformer()
+    tail_pos = np.array(conf.GetAtomPosition(tail_idx), dtype=float)
+    kept = []
+    for d in dirs:
+        s_vals = np.linspace(bond_length, bond_length + lookahead, samples)
+        ok = True
+        for s in s_vals:
+            pt = tail_pos + s*d
+            margin = _clearance_margin_at_point(tree, Z, pt, R_unit, scale=scale)
+            if margin < min_margin:
+                ok = False
+                break
+        if ok:
+            kept.append(d)
+    return kept if kept else dirs[:16]  # 全部不达标时保留少量兜底
 
 
+# === 新增：抓取 head 邻域的可旋二面角（非环、单键）===
+def _local_rotatable_bonds(mol: Chem.Mol, center_idx: int, max_hops=2):
+    dm = Chem.GetDistanceMatrix(mol)
+    rb = []
+    for b in mol.GetBonds():
+        if b.IsInRing(): continue
+        if b.GetBondType() != Chem.BondType.SINGLE: continue
+        i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        if min(dm[center_idx, i], dm[center_idx, j]) <= max_hops:
+            rb.append((i, j))
+    return rb[:3]  # 限定最多 2~3 根，控制搜索量
+
+def _set_dihedral(conf, i, j, k, l, angle_rad):
+    from rdkit.Chem import rdMolTransforms as MT
+    MT.SetDihedralRad(conf, i, j, k, l, float(angle_rad))
+
+# === 替换：两阶段扫描 + 多二面角微搜索 + 代价函数 ===
+def _torsion_place_without_clash(connecting_mol: Chem.Mol,
+                                 new_unit: Chem.Mol,
+                                 tail_idx: int,
+                                 unit_head_idx: int,
+                                 axis_dir: np.ndarray,
+                                 anchor: np.ndarray,
+                                 angles: np.ndarray | None = None,
+                                 offsets: list[float] | None = None) -> tuple[Chem.Mol, float, float, float]:
+    if angles is None:
+        angles = np.linspace(0, 2*np.pi, 18, endpoint=False)  # 粗扫更少点
+    if offsets is None:
+        offsets = [0.0, 0.15, 0.30, 0.45]
+
+    poly_tree, poly_Z = _polymer_kdtree(connecting_mol, exclude_idx={tail_idx}, skip_h=True)
+    rotatable = [j for j in range(new_unit.GetNumAtoms()) if j != unit_head_idx]
+
+    pos0 = _save_positions(new_unit)
+
+    # 可选：构造平面参考（如 head 邻域的芳环）
+    plane_ref = _aromatic_plane_around(new_unit, unit_head_idx, max_hops=2)
+
+    # === 粗扫：选 top-K 候选 ===
+    coarse_cands = []
+    for off in offsets:
+        _restore_positions(new_unit, pos0)
+        if abs(off) > 1e-10:
+            conf = new_unit.GetConformer()
+            for i in range(new_unit.GetNumAtoms()):
+                p = np.array(conf.GetAtomPosition(i), dtype=float)
+                conf.SetAtomPosition(i, Point3D(*(p + axis_dir*off)))
+        offset_pos = _save_positions(new_unit)
+        for ang in angles:
+            _restore_positions(new_unit, offset_pos)
+            rotate_substructure_around_axis(new_unit, rotatable, axis_dir, anchor, ang)
+            pen = _placement_penalty(new_unit, unit_head_idx, poly_tree, poly_Z, plane_ref=plane_ref)
+            coarse_cands.append((pen, float(ang), float(off), _save_positions(new_unit)))
+    coarse_cands.sort(key=lambda x: x[0])
+    coarse_cands = coarse_cands[:6]  # Top-6 进入细扫
+
+    # === 细扫：每个候选附近 ±15°，更细角度，外加 2~3 根本地二面角微调 ===
+    best = (None, 0.0, 0.0, float('inf'))
+    fine_offsets = [0.0, 0.05, 0.10]  # 微调
+    for pen0, ang0, off0, pos in coarse_cands:
+        _restore_positions(new_unit, pos)
+        fine_angles = np.linspace(ang0 - np.deg2rad(15), ang0 + np.deg2rad(15), 24)
+        for off in fine_offsets:
+            # 在 pos 基础上再次小平移
+            _restore_positions(new_unit, pos)
+            if abs(off) > 1e-10:
+                conf = new_unit.GetConformer()
+                for i in range(new_unit.GetNumAtoms()):
+                    p = np.array(conf.GetAtomPosition(i), dtype=float)
+                    conf.SetAtomPosition(i, Point3D(*(p + axis_dir*off)))
+            pos_off = _save_positions(new_unit)
+
+            for ang in fine_angles:
+                _restore_positions(new_unit, pos_off)
+                rotate_substructure_around_axis(new_unit, rotatable, axis_dir, anchor, ang)
+
+                # 邻域 2~3 个可旋二面角的微搜索（-30,0,+30）
+                rbonds = _local_rotatable_bonds(new_unit, unit_head_idx, max_hops=2)
+                conf = new_unit.GetConformer()
+                if rbonds:
+                    # 取每根的一个参考四元组（简单找各端相邻原子）
+                    from rdkit.Chem import rdmolops
+                    for (i,j) in rbonds:
+                        # 选 i 的一个邻居 k（非 j），j 的一个邻居 l（非 i）
+                        ni = [a.GetIdx() for a in new_unit.GetAtomWithIdx(i).GetNeighbors() if a.GetIdx()!=j]
+                        nj = [a.GetIdx() for a in new_unit.GetAtomWithIdx(j).GetNeighbors() if a.GetIdx()!=i]
+                        if not ni or not nj:
+                            continue
+                        k, l = ni[0], nj[0]
+                        for d_ang in (-np.deg2rad(30), 0.0, np.deg2rad(30)):
+                            _set_dihedral(conf, k, i, j, l, d_ang)
+                            # NOTE: 这里只是局部扰动，并不做组合爆炸；若想 beam，可保留 top-2 继续下一根
+                pen = _placement_penalty(new_unit, unit_head_idx, poly_tree, poly_Z, plane_ref=plane_ref)
+                if pen < best[3]:
+                    best = (_save_positions(new_unit), float(ang), float(off0 + off), float(pen))
+                    if pen == 0.0:
+                        break
+
+    if best[0] is not None:
+        _restore_positions(new_unit, best[0])
+    return new_unit, best[1], best[2], best[3]
+
+# === 新增：获取/缓存原子部分电荷（Gasteiger 兜底）===
+def _ensure_partial_charges(mol: Chem.Mol, prop='PartialCharge'):
+    # 已有则跳过
+    if mol.GetAtomWithIdx(0).HasProp(prop):
+        return prop
+    try:
+        Chem.rdPartialCharges.ComputeGasteigerCharges(mol)
+        for a in mol.GetAtoms():
+            val = a.GetDoubleProp('_GasteigerCharge')
+            a.SetDoubleProp(prop, float(val if np.isfinite(val) else 0.0))
+        return prop
+    except Exception:
+        for a in mol.GetAtoms():
+            a.SetDoubleProp(prop, 0.0)
+        return prop
+
+# === 新增：选取 head 附近的芳环定义平面（可选）===
+def _aromatic_plane_around(mol: Chem.Mol, center_idx: int, max_hops=3):
+    ri = mol.GetRingInfo()
+    conf = mol.GetConformer()
+    # 找到包含 center 邻域的芳香环
+    for ring in ri.BondRings():
+        atoms = set()
+        for bidx in ring:
+            b = mol.GetBondWithIdx(bidx)
+            atoms.update([b.GetBeginAtomIdx(), b.GetEndAtomIdx()])
+        atoms = list(atoms)
+        if any(Chem.GetDistanceMatrix(mol)[center_idx, a] <= max_hops for a in atoms):
+            # 计算该环的平面
+            pts = np.array([conf.GetAtomPosition(a) for a in atoms], dtype=float)
+            c = pts.mean(axis=0)
+            u, s, vh = np.linalg.svd(pts - c)
+            n = vh[-1] / (np.linalg.norm(vh[-1]) + 1e-12)
+            return (c, n, set(atoms))
+    return None
+
+# === 新增：矢量化代价（Steric + Coulomb + 可选平面偏离）===
+def _placement_penalty(new_unit: Chem.Mol,
+                       unit_head_idx: int,
+                       poly_tree: cKDTree,
+                       poly_Z: np.ndarray,
+                       coulomb_lambda: float = 0.15,
+                       coulomb_delta: float = 0.3,
+                       steric_scale: float = 0.85,
+                       steric_cap: float = 2.6,
+                       skip_h: bool = True,
+                       plane_ref: tuple | None = None,  # (center, normal, ring_atom_set)
+                       plane_weight: float = 0.05) -> float:
+    conf = new_unit.GetConformer()
+    coords = np.array(conf.GetPositions(), dtype=float)
+    Z = np.array([a.GetAtomicNum() for a in new_unit.GetAtoms()], dtype=int)
+    mask = np.ones(len(Z), dtype=bool)
+    mask[unit_head_idx] = False
+    if skip_h:
+        mask &= (Z != 1)
+
+    if not np.any(mask):
+        return 0.0
+
+    pts = coords[mask]
+    Zi  = Z[mask]
+
+    # KDTree 邻域查找（批量）：逐点 query_ball_point
+    penalty = 0.0
+    # Steric + Coulomb
+    # 预备 charge
+    prop = _ensure_partial_charges(new_unit)
+    qi = np.array([new_unit.GetAtomWithIdx(i).GetDoubleProp(prop) for i, m in enumerate(mask) if m], dtype=float)
+
+    for p, z_i, q_i in zip(pts, Zi, qi):
+        idxs = poly_tree.query_ball_point(p, r=steric_cap)
+        if not idxs:
+            continue
+        pj = poly_tree.data[idxs]               # (M,3)
+        zj = poly_Z[idxs].astype(int)           # (M,)
+        r = np.linalg.norm(pj - p, axis=1)      # (M,)
+
+        ri = _vdw_radius(int(z_i))
+        rj = np.array([_vdw_radius(int(zz)) for zz in zj])
+        rmin = np.minimum(steric_cap, steric_scale*(ri + rj))
+        # Steric
+        overlap = np.maximum(0.0, rmin - r)
+        penalty += float(np.sum(overlap*overlap))
+        # Coulomb (screened)
+        # 取聚合物端的电荷为 0（或未来若也持有 PartialCharge 可取出）
+        penalty += float(coulomb_lambda * np.sum(q_i*0.0 / np.sqrt(r*r + coulomb_delta*coulomb_delta)))
+
+    # 平面约束（如果提供了环平面）
+    if plane_ref is not None:
+        c, n, ring = plane_ref
+        # 对 new_unit 上的芳环原子（与 head 邻域）轻度约束：距离平面^2
+        # 这里简单处理：离 head 最近的 6~10 个非 H 原子
+        d2 = 0.0
+        order = np.argsort(np.linalg.norm(coords - coords[unit_head_idx], axis=1))
+        count = 0
+        for idx in order:
+            if idx == unit_head_idx or (skip_h and new_unit.GetAtomWithIdx(idx).GetAtomicNum() == 1):
+                continue
+            dist_plane = np.dot(coords[idx] - c, n)
+            d2 += dist_plane*dist_plane
+            count += 1
+            if count >= 8: break
+        penalty += plane_weight * float(d2)
+
+    return penalty

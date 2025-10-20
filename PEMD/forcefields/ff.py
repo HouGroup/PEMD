@@ -6,8 +6,6 @@ import pandas as pd
 import parmed as pmd
 import importlib.resources as pkg_resources
 
-from rdkit import Chem
-from rdkit.Chem.rdchem import KekulizeException
 from pathlib import Path
 from foyer import Forcefield
 from collections import defaultdict
@@ -15,6 +13,7 @@ from collections import defaultdict
 from PEMD import io
 from PEMD.forcefields.xml import XMLGenerator
 from PEMD.forcefields.ligpargen import PEMDLigpargen
+
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module=r"foyer\.forcefield")
@@ -160,35 +159,107 @@ def gen_ff_from_data(work_dir, compound_name, corr_factor, target_sum_chg):
     scale_chg_itp(MD_dir, filename, corr_factor, target_sum_chg)
     # print(f"scale charge successfully.")
 
-def find_substruct_matches(target_mol, query_mol, *, uniquify=True):
-    """Return substructure matches with fallbacks for aromatic systems."""
+# def find_substruct_matches(target_mol, query_mol, *, uniquify=True):
+#     """Return substructure matches with fallbacks for aromatic systems."""
+#
+#     if target_mol is None or query_mol is None:
+#         return []
+#
+#     matches = list(target_mol.GetSubstructMatches(
+#         query_mol,
+#         uniquify=uniquify,
+#         useChirality=False,
+#     ))
+#     if matches:
+#         return matches
+#
+#     target_copy = Chem.Mol(target_mol)
+#     query_copy = Chem.Mol(query_mol)
+#
+#     try:
+#         Chem.Kekulize(target_copy, clearAromaticFlags=True)
+#         Chem.Kekulize(query_copy, clearAromaticFlags=True)
+#     except KekulizeException:
+#         return matches
+#
+#     return list(target_copy.GetSubstructMatches(
+#         query_copy,
+#         uniquify=uniquify,
+#         useChirality=False,
+#     ))
+from rdkit import Chem
+from rdkit.Chem.rdchem import KekulizeException
 
+def find_substruct_matches(
+    target_mol,
+    query_mol,
+    *,
+    uniquify=False,
+    ignore_stereo=True,          # 忽略手性/顺反（默认更宽松）
+    allow_aromatic_conj=True,    # 芳香↔共轭兼容（新版本更稳）
+    match_hs=True,               # 显式氢也参与匹配（和你“保持氢”的需求一致）
+    try_remove_stereo=True       # 第一层回退：移除立体信息
+):
+    """Return substructure matches with robust fallbacks and cross-version guards."""
     if target_mol is None or query_mol is None:
         return []
 
-    matches = list(target_mol.GetSubstructMatches(
-        query_mol,
-        uniquify=uniquify,
-        useChirality=False,
-    ))
+    # --- 小工具：跨版本获取匹配，保证确定性排序 ---
+    def _get_matches(t, q, params):
+        try:
+            ms = list(t.GetSubstructMatches(q, params=params))
+        except TypeError:
+            # 老版本 RDKit 没有 params=，退化为手动传常用参数
+            ms = list(t.GetSubstructMatches(
+                q,
+                useChirality=getattr(params, 'useChirality', False),
+                uniquify=uniquify
+            ))
+        # 确定性排序：先按长度，再按元组字典序
+        return sorted(ms, key=lambda m: (len(m), m))
+
+    # --- 优先路径：使用 SubstructMatchParameters 控制开关 ---
+    p = Chem.SubstructMatchParameters()
+    # 顶层开关
+    p.uniquify = uniquify
+    if hasattr(p, 'useChirality'):
+        p.useChirality = not ignore_stereo
+    if hasattr(p, 'useEnhancedStereo'):
+        p.useEnhancedStereo = not ignore_stereo
+    if hasattr(p, 'aromaticMatchesConjugated'):
+        p.aromaticMatchesConjugated = allow_aromatic_conj
+    if hasattr(p, 'useHs'):
+        p.useHs = match_hs
+    if hasattr(p, 'maxMatches'):
+        p.maxMatches = 0  # 0 = 不限数量
+
+    # 直匹配
+    matches = _get_matches(target_mol, query_mol, p)
     if matches:
         return matches
 
-    target_copy = Chem.Mol(target_mol)
-    query_copy = Chem.Mol(query_mol)
+    # --- 回退 1：完全去除立体信息再匹配（更宽容的等价拓扑） ---
+    if try_remove_stereo:
+        t2 = Chem.Mol(target_mol); Chem.RemoveStereochemistry(t2)
+        q2 = Chem.Mol(query_mol);  Chem.RemoveStereochemistry(q2)
+        matches = _get_matches(t2, q2, p)
+        if matches:
+            return matches
 
+    # --- 回退 2：Kekulize，清除芳香标记再匹配（应对芳香/共轭体系差异） ---
+    t3 = Chem.Mol(target_mol)
+    q3 = Chem.Mol(query_mol)
     try:
-        Chem.Kekulize(target_copy, clearAromaticFlags=True)
-        Chem.Kekulize(query_copy, clearAromaticFlags=True)
+        Chem.Kekulize(t3, clearAromaticFlags=True)
+        Chem.Kekulize(q3, clearAromaticFlags=True)
     except KekulizeException:
-        return matches
+        return []
 
-    return list(target_copy.GetSubstructMatches(
-        query_copy,
-        uniquify=uniquify,
-        useChirality=False,
-    ))
+    # 清了芳香标记后，必要时把 aromaticMatchesConjugated 关掉
+    if hasattr(p, 'aromaticMatchesConjugated'):
+        p.aromaticMatchesConjugated = False
 
+    return _get_matches(t3, q3, p)
 
 def select_non_overlapping_matches(matches, used_atoms=None):
     """Select non-overlapping matches in a deterministic order."""
@@ -314,7 +385,7 @@ def apply_chg_to_poly(
         left_match = min(all_left, key=lambda m: sum(m)/len(m))
         left_matches.append(left_match)
         used_atoms.update(left_match)
-    # print(f"Matches for left_mol: {left_matches}")
+    print(f"Matches for left_mol: {left_matches}")
 
     # Match ``right_mol`` within ``mol_poly``
     right_matches = []
@@ -326,7 +397,7 @@ def apply_chg_to_poly(
         if not any(atom_idx in used_atoms for atom_idx in right_match):
             right_matches.append(right_match)
             used_atoms.update(right_match)
-    # print(f"Matches for right_mol: {right_matches}")
+    print(f"Matches for right_mol: {right_matches}")
 
     # Assign partial charges for the matching atoms in ``mol_poly``
     assign_partial_charges(mol_poly, left_mol, left_matches)
@@ -343,7 +414,7 @@ def apply_chg_to_poly(
     #         continue  # Skip overlapping matches
         mid_matches.append(match)
         used_atoms.update(match)  # Mark atoms as used
-    # print(f"Matches for mid_mol: {mid_matches}")
+    print(f"Matches for mid_mol: {mid_matches}")
 
     # Assign partial charges to the ``mid_mol`` matches
     assign_partial_charges(mol_poly, mid_mol, mid_matches)
@@ -745,7 +816,6 @@ def scale_chg_itp(work_dir, filename, corr_factor, target_sum_chg):
     # save the updated itp file
     with open(filename, 'w') as file:
         file.writelines(lines)
-
 
 
 
