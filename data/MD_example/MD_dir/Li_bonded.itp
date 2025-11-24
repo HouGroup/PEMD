@@ -1,0 +1,9 @@
+[ moleculetype ]
+; molname   nrexcl
+LIP          1
+
+[ atoms ]
+; id    at type     res nr  residu name at name  cg nr  charge   mass
+1 Li 1 LIP Li 1 0.70000000 6.941
+
+

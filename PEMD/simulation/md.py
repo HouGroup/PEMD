@@ -89,8 +89,6 @@ def annealing(
         anneal_rate,
         anneal_npoints,
         packmol_pdb,
-        # density,
-        # add_length,
         gpu
 ):
     MD_dir = os.path.join(work_dir, 'MD_dir')
@@ -117,8 +115,8 @@ def annealing(
 
     gmx.gen_npt_anneal_mdp_file(
         T_high_increase,
-        anneal_rate,
-        anneal_npoints,
+        anneal_rate = anneal_rate,
+        anneal_npoints = anneal_npoints,
         filename = 'npt_anneal.mdp'
     )
 
@@ -142,7 +140,8 @@ def annealing(
     ).run_local()
 
     gmx.commands_npt_anneal(
-        input_gro = 'nvt.gro'
+        input_gro = 'nvt.gro',
+        output_str = 'npt_anneal'
     ).run_local()
 
     gmx.commands_npt(
@@ -173,6 +172,48 @@ def annealing(
         save_gro_file = 'pre_eq.gro',
         frame_time = frame_time
     ).run_local()
+
+
+def Tg(
+        work_dir,
+        molecules,
+        T_init,
+        T_final,
+        delta_T,    # K
+        eq_time,    # ns
+        anneal_rate,
+        gpu
+):
+
+    MD_dir = os.path.join(work_dir, 'MD_dir')
+    os.makedirs(MD_dir, exist_ok=True)
+
+    gmx = PEMDGROMACS(
+        MD_dir,
+        molecules,
+        T_init,
+        gpu,
+    )
+
+    gmx.gen_top_file(
+        top_filename = 'topol.top'
+    )
+
+    gmx.gen_npt_anneal_mdp_file(
+        Tg = True,
+        T_init = T_init,
+        T_final = T_final,
+        delta_T = delta_T,
+        eq_time = eq_time,
+        anneal_rate = anneal_rate,
+        filename = "npt_tg.mdp",
+    )
+
+    gmx.commands_npt_anneal(
+        input_gro = 'pre_eq.gro',
+        output_str = 'npt_tg'
+    ).run_local()
+
 
 def run_gmx_prod(
         work_dir,
@@ -211,6 +252,7 @@ def run_gmx_prod(
     gmx.commands_wraptounwrap(
         output_str = 'nvt_prod'
     ).run_local()
+
 
 
 

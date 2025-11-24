@@ -1,0 +1,25 @@
+; gromcs generation top file
+; Created by PEMD
+
+[ defaults ]
+;nbfunc  comb-rule   gen-pairs   fudgeLJ  fudgeQQ
+1        3           yes         0.5      0.5
+
+;LOAD atomtypes
+[ atomtypes ]
+#include "poly_1_nonbonded.itp"
+#include "Li_nonbonded.itp"
+#include "TFSI_nonbonded.itp"
+
+#include "poly_1_bonded.itp"
+#include "Li_bonded.itp"
+#include "TFSI_bonded.itp"
+
+[ system ]
+;name poly_1LiTFSI
+
+[ molecules ]
+MOL 11
+LIP 100
+NSC 100
+

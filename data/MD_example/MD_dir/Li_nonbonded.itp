@@ -1,0 +1,9 @@
+[ atomtypes ]
+; full atom descriptions are available in ffoplsaa.atp
+; Parameters for Li+ from JCTC 2, 1499 (2006)
+; name  bond_type    mass    charge   ptype          sigma      epsilon
+ Li   Li+  3   6.94100     0.0       A       0.287      2.092021E-3
+
+
+
+

@@ -77,31 +77,181 @@ def order_energy_xtb(work_dir, xyz_file, numconf, output_file):
 # input: a xyz file
 # output: a list store the xyz structure
 # Description: read the xyz file and store the structure in a list
+def _parse_comment_fields(s: str):
+    """从XYZ第二行的注释里提取 ID / Energy / Success，未找到则返回 None。"""
+    ID = None
+    Energy = None
+    Success = None
+
+    if not s:
+        return ID, Energy, Success
+
+    # ID = 123
+    m = re.search(r'\bid\s*=\s*([^\s;]+)', s, flags=re.IGNORECASE)
+    if m:
+        raw = m.group(1)
+        try:
+            ID = int(raw)
+        except ValueError:
+            ID = raw  # 若不是纯整数，保留原始字符串
+
+    # Energy = -10684.9945835000
+    m = re.search(r'\benergy\s*=\s*([+\-]?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)', s)
+    if m:
+        try:
+            Energy = float(m.group(1))
+        except ValueError:
+            Energy = None
+
+    # Success = True/False/Yes/No/1/0
+    m = re.search(r'\bsuccess\s*=\s*([^\s;]+)', s, flags=re.IGNORECASE)
+    if m:
+        val = m.group(1).strip().lower()
+        if val in {"true", "t", "yes", "y", "1"}:
+            Success = True
+        elif val in {"false", "f", "no", "n", "0"}:
+            Success = False
+        else:
+            Success = None
+
+    return ID, Energy, Success
+
+
 def read_xyz_file(file_path):
     structures = []
     with open(file_path, 'r') as f:
-        lines = f.readlines()
+        lines = [ln.rstrip('\n') for ln in f]
+
     i = 0
-    while i < len(lines):
-        num_atoms_line = lines[i].strip()
+    n = len(lines)
+    while i < n:
+        num_atoms_line = (lines[i].strip() if i < n else "")
         if num_atoms_line.isdigit():
             num_atoms = int(num_atoms_line)
+
+            # 需要至少一行注释 + num_atoms 行坐标
+            if i + 1 >= n or i + 2 + num_atoms > n:
+                # 文件不完整，终止解析
+                break
+
             comment_line = lines[i + 1].strip()
+            ID, Energy, Success = _parse_comment_fields(comment_line)
+
             atoms = []
             for j in range(i + 2, i + 2 + num_atoms):
                 atom_line = lines[j].strip()
                 atoms.append(atom_line)
+
             structure = {
                 'num_atoms': num_atoms,
-                'comment': comment_line,
-                'atoms': atoms
+                'id': ID,           # 可能是 int 或 str，未解析到则为 None
+                'energy': Energy,   # float 或 None
+                'success': Success, # bool 或 None
+                'atoms': atoms,
             }
             structures.append(structure)
+
             i = i + 2 + num_atoms
         else:
             i += 1
+
     return structures
 
+def dedup_structures(structs: list[dict],
+                      mode: str = "energy",         # 'energy' | 'rmsd' | 'energy_and_rmsd' | 'energy_or_rmsd'
+                      energy_tol_in_input_unit: float = 0.000159,  # ≈ 0.10 kcal/mol (Hartree)
+                      rmsd_tol: float = 0.30,
+                      rmsd_heavy_only: bool = True) -> list[dict]:
+    """
+    对 final_structures 去重。每个结构字典含:
+      {'num_atoms', 'atoms'(list[str]), 'id', 'energy'(float|None), 'success'(bool)}
+    返回“保留”的子集（保持原顺序的贪心筛选）。
+    """
+    kept = []
+    for s in structs:
+        e_s = s.get('energy', None)
+        # 预取坐标
+        _, coords_s = _atoms_to_coords(s['atoms'], heavy_only=rmsd_heavy_only)
+        is_dup = False
+        for t in kept:
+            cond_energy = False
+            cond_rmsd = False
+
+            # 能量判据
+            e_t = t.get('energy', None)
+            if (e_s is not None) and (e_t is not None):
+                if abs(e_s - e_t) <= energy_tol_in_input_unit:
+                    cond_energy = True
+
+            # RMSD 判据
+            _, coords_t = _atoms_to_coords(t['atoms'], heavy_only=rmsd_heavy_only)
+            if coords_s.shape == coords_t.shape and coords_s.shape[0] >= 3:
+                try:
+                    val = _kabsch_rmsd(coords_s, coords_t)
+                    if val <= rmsd_tol:
+                        cond_rmsd = True
+                except Exception:
+                    pass
+
+            if mode == "energy":
+                is_dup = cond_energy
+            elif mode == "rmsd":
+                is_dup = cond_rmsd
+            elif mode == "energy_and_rmsd":
+                is_dup = cond_energy and cond_rmsd
+            elif mode == "energy_or_rmsd":
+                is_dup = cond_energy or cond_rmsd
+            else:  # 未知模式，默认按 energy_or_rmsd
+                is_dup = cond_energy or cond_rmsd
+
+            if is_dup:
+                break
+        if not is_dup:
+            kept.append(s)
+    return kept
+
+def _kabsch_rmsd(P: np.ndarray, Q: np.ndarray) -> float:
+    """最佳刚体叠合后的 RMSD，P/Q: (N,3)"""
+    Pc = P - P.mean(axis=0, keepdims=True)
+    Qc = Q - Q.mean(axis=0, keepdims=True)
+    H = Pc.T @ Qc
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    diff = Pc @ R - Qc
+    return float(np.sqrt((diff * diff).sum() / P.shape[0]))
+
+def _atoms_to_coords(atoms_lines, heavy_only=True):
+    """
+    将 ['C x y z', 'H x y z', ...] 解析为 (symbols, coords[N,3])。
+    heavy_only=True 时丢弃氢（以 'H' 开头的元素/标签）。
+    """
+    symbols = []
+    coords = []
+    for line in atoms_lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        sym = parts[0]
+        # 兼容 H*、H1 等：只要以 H/h 开头都视为氢
+        is_h = sym.upper().startswith('H')
+        if heavy_only and is_h:
+            continue
+        try:
+            x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+        except ValueError:
+            continue
+        symbols.append(sym)
+        coords.append([x, y, z])
+    if not coords:  # 若全被丢弃，则退回全原子
+        for line in atoms_lines:
+            parts = line.split()
+            if len(parts) >= 4:
+                symbols.append(parts[0])
+                coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    return symbols, np.asarray(coords, dtype=float)
 
 def read_energy_from_gaussian(log_file_path: str):
     # Free energy (optimization + frequency) line

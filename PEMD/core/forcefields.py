@@ -122,7 +122,7 @@ class Forcefield:
         end_repeating: int = 1,
         scale: float = 1.0,
         charge: float = 0,
-        pdb_file: str | None = None,
+        mol_long: Chem.Mol | None = None,
     ):
         lib.print_input('OPLS-AA Force Field Generation')
 
@@ -144,14 +144,14 @@ class Forcefield:
                     mol=mol_short,
                     name=name,
                     resname=resname,
-                    pdb_filename=f"{name}.pdb",
+                    pdb_filename=f"{name}_short.pdb",
                 )
 
                 chg_df = get_xml_ligpargen(
                     work_dir,
                     name,
                     resname,
-                    pdb_file=f"{name}.pdb",
+                    pdb_file=f"{name}_short.pdb",
                     charge=charge,
                     charge_model='CM1A-LBCC',
                 )
@@ -163,14 +163,18 @@ class Forcefield:
                     chg_df = resp_df.copy()
                     chg_df.insert(0, 'position', chg_df.index)
 
-                work_path = Path(work_dir)
-                pdb_path = work_path / pdb_file
-                mol_long = Chem.MolFromPDBFile(str(pdb_path), removeHs=False)
+                mol_to_pdb(
+                    work_dir=work_dir,
+                    mol=mol_long,
+                    name=name,
+                    resname=resname,
+                    pdb_filename=f"{name}_long.pdb",
+                )
 
                 bonditp_filename = get_oplsaa_xml(
                     work_dir,
                     name,
-                    pdb_file,
+                    pdb_file = f"{name}_long.pdb",
                 )
 
                 apply_chg_to_poly(
@@ -235,7 +239,7 @@ class Forcefield:
             ff_source: str = "ligpargen",
             resp_csv: str | None = None,
             resp_df: pd.DataFrame | None = None,
-            pdb_file: str | None = None,
+            mol_long: Chem.Mol | None = None,
             end_repeating: int = 1,
     ):
         instance = cls.from_json(work_dir, json_file, mol_type, )
@@ -260,7 +264,7 @@ class Forcefield:
             charge=instance.charge,
             smiles=instance.repeating_unit if polymer else instance.smiles,
             end_repeating=end_repeating,
-            pdb_file=pdb_file,
+            mol_long=mol_long,
         )
 
 

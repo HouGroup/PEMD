@@ -120,7 +120,7 @@ class PEMDModel:
         resname: str = "MOL",
         left_cap: str | None = None,
         right_cap: str | None = None,
-    ) -> str:
+    ):
         """Generate a copolymer PDB file using a unified interface."""
         lib.print_input('Polymer Model Construction')
 
@@ -166,8 +166,10 @@ class PEMDModel:
             resname=resname,
             pdb_filename=pdb_filename,
         )
+
         lib.print_output(f'Polymer Model Construction {pdb_filename}')
-        return pdb_filename
+
+        return mol
 
 
     @classmethod
@@ -175,10 +177,10 @@ class PEMDModel:
         cls,
         work_dir: Path,
         json_file: str
-    ) -> str:
+    ):
         instance = cls.from_json(work_dir, json_file)
 
-        pdb_file = cls.copolymer(
+        mol = cls.copolymer(
             work_dir=instance.work_dir,
             smiles_A=instance.smiles_A,
             smiles_B=instance.smiles_B,
@@ -191,7 +193,7 @@ class PEMDModel:
             left_cap=instance.leftcap,
             right_cap=instance.rightcap,
         )
-        return pdb_file
+        return mol
 
 
     @staticmethod
@@ -203,7 +205,7 @@ class PEMDModel:
         resname: str = "MOL",
         left_cap: str | None = None,
         right_cap: str | None = None,
-    ) -> str:
+    ):
 
         return PEMDModel.copolymer(
             work_dir=work_dir,
@@ -226,6 +228,7 @@ class PEMDModel:
     ):
 
         instance = cls.from_json(work_dir, json_file)
+        print(instance.length)
 
         if instance.length:
             return cls.homopolymer(
@@ -238,7 +241,7 @@ class PEMDModel:
                 right_cap=instance.rightcap,
             )
         elif instance.length_short and instance.length_long:
-            pdb_file_short = cls.homopolymer(
+            mol_short = cls.homopolymer(
                 work_dir=instance.work_dir,
                 name=instance.name,
                 smiles=instance.repeating_unit,
@@ -247,7 +250,7 @@ class PEMDModel:
                 left_cap=instance.leftcap,
                 right_cap=instance.rightcap,
             )
-            pdb_file_long = cls.homopolymer(
+            mol_long = cls.homopolymer(
                 work_dir=instance.work_dir,
                 name=instance.name,
                 smiles=instance.repeating_unit,
@@ -256,7 +259,7 @@ class PEMDModel:
                 left_cap=instance.leftcap,
                 right_cap=instance.rightcap,
             )
-            return pdb_file_short, pdb_file_long
+            return mol_short, mol_long
 
 
     @staticmethod

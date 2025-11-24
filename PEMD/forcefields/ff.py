@@ -98,6 +98,9 @@ def get_oplsaa_xml(
     top_path.unlink(missing_ok=True)
     xml_path.unlink(missing_ok=True)
 
+    pdb_path = work_path / pdb_file
+    pdb_path.unlink(missing_ok=True)
+
     print(f'Generate {name}_bonded.itp and {name}_nonbonded.itp in ./{md_dir} path.')
 
     return f'{name}_bonded.itp'
@@ -159,34 +162,6 @@ def gen_ff_from_data(work_dir, compound_name, corr_factor, target_sum_chg):
     scale_chg_itp(MD_dir, filename, corr_factor, target_sum_chg)
     # print(f"scale charge successfully.")
 
-# def find_substruct_matches(target_mol, query_mol, *, uniquify=True):
-#     """Return substructure matches with fallbacks for aromatic systems."""
-#
-#     if target_mol is None or query_mol is None:
-#         return []
-#
-#     matches = list(target_mol.GetSubstructMatches(
-#         query_mol,
-#         uniquify=uniquify,
-#         useChirality=False,
-#     ))
-#     if matches:
-#         return matches
-#
-#     target_copy = Chem.Mol(target_mol)
-#     query_copy = Chem.Mol(query_mol)
-#
-#     try:
-#         Chem.Kekulize(target_copy, clearAromaticFlags=True)
-#         Chem.Kekulize(query_copy, clearAromaticFlags=True)
-#     except KekulizeException:
-#         return matches
-#
-#     return list(target_copy.GetSubstructMatches(
-#         query_copy,
-#         uniquify=uniquify,
-#         useChirality=False,
-#     ))
 from rdkit import Chem
 from rdkit.Chem.rdchem import KekulizeException
 
@@ -312,43 +287,6 @@ def mol_to_charge_df(mol):
 
     return df
 
-def ensure_all_atoms_have_charges(mol):
-    """Ensure that every atom in ``mol`` has an assigned partial charge."""
-
-    def missing_atoms(current_mol):
-        return [atom.GetIdx() for atom in current_mol.GetAtoms()
-                if not atom.HasProp('partial_charge')]
-
-    missing = missing_atoms(mol)
-    if not missing:
-        return
-
-    # Propagate charges from neighbouring atoms first
-    for _ in range(3):
-        updated = False
-        still_missing = []
-        for atom_idx in missing:
-            atom = mol.GetAtomWithIdx(atom_idx)
-            neighbour_charges = [
-                neigh.GetDoubleProp('partial_charge')
-                for neigh in atom.GetNeighbors()
-                if neigh.HasProp('partial_charge')
-            ]
-            if neighbour_charges:
-                average_charge = sum(neighbour_charges) / len(neighbour_charges)
-                atom.SetDoubleProp('partial_charge', average_charge)
-                updated = True
-            else:
-                still_missing.append(atom_idx)
-        missing = still_missing
-        if not missing or not updated:
-            break
-
-    # Final fallback for any isolated atoms that still miss charges
-    for atom_idx in missing:
-        mol.GetAtomWithIdx(atom_idx).SetDoubleProp('partial_charge', 0.0)
-
-
 def apply_chg_to_poly(
         work_dir,
         mol_short,
@@ -418,8 +356,6 @@ def apply_chg_to_poly(
 
     # Assign partial charges to the ``mid_mol`` matches
     assign_partial_charges(mol_poly, mid_mol, mid_matches)
-
-    ensure_all_atoms_have_charges(mol_poly)
 
     # Extract the updated charges into a DataFrame
     charge_update_df = mol_to_charge_df(mol_poly)

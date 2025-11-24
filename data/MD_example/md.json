@@ -1,0 +1,32 @@
+{
+    "polymer": {
+        "name": "poly_1",
+        "resname": "MOL",
+        "repeating_unit": "*CCO*",
+        "left_cap": "",
+        "right_cap": "",
+        "length": [
+            6,
+            113
+        ],
+        "numbers": 11,
+        "scale": 1.0,
+        "charge": 0
+    },
+    "Li_cation": {
+        "name": "Li",
+        "resname": "LIP",
+        "numbers": 100,
+        "smiles": "[Li+]",
+        "scale": 0.7,
+        "charge": 1
+    },
+    "salt_anion": {
+        "name": "TFSI",
+        "resname": "NSC",
+        "numbers": 100,
+        "smiles": "C(F)(F)(F)(F)S(=O)(=O)[O-]",
+        "scale": 0.7,
+        "charge": -1
+    }
+}

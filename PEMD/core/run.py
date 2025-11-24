@@ -25,6 +25,7 @@ from PEMD.simulation.qm import (
 from PEMD.simulation.md import (
     relax_poly_chain,
     annealing,
+    Tg,
     run_gmx_prod
 )
 
@@ -45,7 +46,7 @@ class QMRun:
         mult: int = 1,
         function: str = 'B3LYP',
         basis_set: str = '6-31+g(d,p)',
-        epsilon: float = 5.0,
+        epsilon: float | None = None,
         core: int = 64,
         memory: str = '128GB',
         chk: bool = False,
@@ -53,7 +54,14 @@ class QMRun:
         multi_step: bool = False,
         max_attempts: int = 1,
         toxyz: bool = True,
-        top_n_qm: int = 4,
+        top_n_qm: int | None = None,
+        dedup: bool = False,
+        dedup_mode: str = 'energy',
+        energy_window: float = 0.1, # kcal/mol
+        rmsd_window: float = 0.3,   # angstrom
+        continue_on_fail: bool = False,
+        continue_on_success: bool = False,
+        save_log: bool = True,
     ):
         lib.print_input('Quantum Chemistry Calculations')
         return qm_gaussian(
@@ -72,7 +80,14 @@ class QMRun:
             multi_step=multi_step,
             max_attempts=max_attempts,
             toxyz=toxyz,
-            top_n_qm=top_n_qm
+            top_n_qm=top_n_qm,
+            dedup=dedup,
+            dedup_mode=dedup_mode,
+            energy_window=energy_window,
+            rmsd_window=rmsd_window,
+            continue_on_fail=continue_on_fail,
+            continue_on_success=continue_on_success,
+            save_log=save_log,
         )
 
 
@@ -93,7 +108,9 @@ class QMRun:
         local_checkpoint: Path | str | None = None,
         hf_cache_dir: Path | str | None = None,
         hf_offline: bool = False,
-        top_n_uma: int = 8,
+        top_n_uma: int | None = None,
+        continue_on_fail: bool = False,
+        continue_on_success: bool = False,
     ):
         lib.print_input('UMA Geometry Optimization')
         return uma(
@@ -112,6 +129,8 @@ class QMRun:
             local_checkpoint=local_checkpoint,
             hf_cache_dir=hf_cache_dir,
             hf_offline=hf_offline,
+            continue_on_fail=continue_on_fail,
+            continue_on_success=continue_on_success,
         )
 
 
@@ -121,6 +140,7 @@ class QMRun:
         *,
         smiles: str | None = None,
         pdb_file: str | None = None,
+        mol: Any | None = None,
         max_conformers: int | None = None,
         top_n_MMFF: int | None = None,
         top_n_uma: int | None = None,
@@ -131,7 +151,7 @@ class QMRun:
         gfn: str = 'gfn2',
         function: str = 'b3lyp',
         basis_set: str = '6-31g*',
-        epsilon: float = 2.0,
+        epsilon: float | None = None,
         core: int = 32,
         memory: str = '64GB',
         max_steps_uma: int = 2000,
@@ -150,6 +170,7 @@ class QMRun:
             top_n_MMFF=top_n_MMFF,
             smiles=smiles,
             pdb_file=pdb_file,
+            mol=mol,
         )
 
         xyz_file_xtb_uma = None
@@ -185,29 +206,34 @@ class QMRun:
                 hf_offline=hf_offline,
             )
 
+        xyz_file_gaussian = None
         # Optimize conformers using Gaussian
-        xyz_file_gaussian = qm_gaussian(
-            work_dir,
-            xyz_file_xtb_uma,
-            gjf_filename="conf",
-            charge=charge,
-            mult= mult,
-            function=function,
-            basis_set=basis_set,
-            epsilon=epsilon,
-            core=core,
-            memory=memory,
-            optimize=True,
-            multi_step=True,
-            max_attempts=2,
-            toxyz=True,
-            top_n_qm=top_n_qm,
-        )
+        if top_n_qm:
+            xyz_file_gaussian = qm_gaussian(
+                work_dir,
+                xyz_file_xtb_uma,
+                gjf_filename="conf",
+                charge=charge,
+                mult= mult,
+                function=function,
+                basis_set=basis_set,
+                epsilon=epsilon,
+                core=core,
+                memory=memory,
+                optimize=True,
+                multi_step=True,
+                max_attempts=2,
+                toxyz=True,
+                top_n_qm=top_n_qm,
+                save_log = False
+            )
 
         lib.print_output(f'Conformer Search Done')
 
-        return xyz_file_gaussian
-
+        if xyz_file_gaussian:
+            return xyz_file_gaussian
+        elif xyz_file_xtb_uma:
+            return xyz_file_xtb_uma
 
     @staticmethod
     def resp_chg_fitting(
@@ -367,9 +393,57 @@ class MDRun:
             anneal_rate,
             anneal_npoints,
             packmol_pdb,
-            # density,
-            # add_length,
             gpu,
+        )
+
+    @staticmethod
+    def Tg(
+        work_dir: Path | str,
+        molecules: List[Dict[str, Any]],
+        T_init: int = 500,
+        T_final: int = 200,
+        delta_T: int = 20,    # K
+        eq_time: int = 2,    # ns
+        anneal_rate: float = 0.05,
+        gpu=False
+    ):
+
+        Tg(
+            work_dir,
+            molecules,
+            T_init,
+            T_final,
+            delta_T,    # K
+            eq_time,
+            anneal_rate,
+            gpu
+        )
+
+    @classmethod
+    def Tg_from_json(
+        cls,
+        work_dir: Path | str,
+        json_file: str,
+        T_init: int = 500,
+        T_final: int = 200,
+        delta_T: int = 20,
+        eq_time: int = 2,
+        anneal_rate: float = 0.05,
+        gpu=False
+    ):
+
+        work_dir = Path(work_dir)
+        instance = cls.from_json(work_dir, json_file)
+
+        Tg(
+            work_dir,
+            instance.molecules,
+            T_init,
+            T_final,
+            delta_T,
+            eq_time,
+            anneal_rate = anneal_rate,
+            gpu = gpu
         )
 
 

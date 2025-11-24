@@ -21,7 +21,7 @@ class PEMDGaussian:
         mult=1,
         function='B3LYP',
         basis_set='6-31+g(d,p)',
-        epsilon=5.0,
+        epsilon=None,
         optimize=True,
         multi_step=False,  # Decide whether to perform multi-step calculations
         max_attempts=3,    # Maximum number of attempts
@@ -62,6 +62,8 @@ class PEMDGaussian:
         if chk:
             file_contents += f"%chk={os.path.join(self.work_dir, prefix + '_opt.chk')}\n"
 
+        use_pcm = self.epsilon is not None
+
         if self.optimize:
 
             tight_flag = "tight" if self.function.upper() == "M062X" else None
@@ -80,9 +82,11 @@ class PEMDGaussian:
 
             route_section = (
                 f"# opt({','.join(opt_params)}) freq "
-                f"{self.function} {self.basis_set} "
-                f"scrf=(pcm,solvent=generic,read) nosymm"
+                f"{self.function} {self.basis_set}"
             )
+            if use_pcm:
+                route_section += " scrf=(pcm,solvent=generic,read)"
+            route_section += " nosymm"
         else:
             route_section = (
                 f"# {self.function} {self.basis_set} "
@@ -118,9 +122,12 @@ class PEMDGaussian:
                 continue
 
         file_contents += '\n'
-        file_contents += f"eps={self.epsilon}\n"
-        file_contents += "epsinf=2.1\n"
-        file_contents += '\n\n'
+        if use_pcm:
+            file_contents += f"eps={self.epsilon}\n"
+            file_contents += "epsinf=2.1\n"
+            file_contents += '\n\n'
+        else:
+            file_contents += '\n'
 
         file_path = os.path.join(self.work_dir, self.filename)
         try:
@@ -314,13 +321,13 @@ class PEMDGaussian:
                             except Exception as e:
                                 self.logger.error(f"Failed to modify input file for {self.filename}: {e}")
                                 return 'failed', f'{prefix}.log'
-                        elif 'l502' in error_codes:
-                            self.logger.info("Detected l502 error. Adding scf=xqc to the route section.")
-                            try:
-                                self.generate_input_file(structure=structure_current, chk=chk, gaucontinue=False, additional_options=" scf=xqc")
-                            except Exception as e:
-                                self.logger.error(f"Failed to add scf=xqc to input file for {self.filename}: {e}")
-                                return 'failed', f'{prefix}.log'
+                        # elif 'l502' in error_codes:
+                        #     self.logger.info("Detected l502 error. Adding scf=xqc to the route section.")
+                        #     try:
+                        #         self.generate_input_file(structure=structure_current, chk=chk, gaucontinue=False, additional_options=" scf=xqc")
+                        #     except Exception as e:
+                        #         self.logger.error(f"Failed to add scf=xqc to input file for {self.filename}: {e}")
+                        #         return 'failed', f'{prefix}.log'
                         elif 'l103' in error_codes and specific_errors and not use_cartesian_flag:
                             self.logger.info("Detected l103 error with specific messages. Adding cartesian to opt.")
                             try:

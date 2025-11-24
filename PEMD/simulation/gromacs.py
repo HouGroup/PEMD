@@ -221,16 +221,65 @@ class PEMDGROMACS:
             file.write(file_contents)
         print(f"NPT mdp file generation successful：{filename}\n")
 
-    def gen_npt_anneal_mdp_file(self, T_high_increase = 500, anneal_rate = 0.05, anneal_npoints = 5, filename='npt_anneal.mdp'):
-
+    def gen_npt_anneal_mdp_file(
+            self,
+            Tg: bool = False,
+            *,
+            T_init: float = 600,
+            T_final: float = 300,
+            delta_T: float = 20, # K
+            eq_time: float = 2.0, # ns
+            T_high_increase: float = 500,
+            anneal_rate: float = 0.05, # K/ps
+            anneal_npoints: int = 5,
+            filename: str = 'npt_anneal.mdp'
+    ):
         filepath = os.path.join(self.work_dir, filename)
 
         # Setup annealing
-        T_high = self.temperature + T_high_increase
-        annealing_time_steps = int((T_high - self.temperature) / anneal_rate)
-        nsteps_annealing = (1000 * 2 + 2 * annealing_time_steps) * 1000
-        annealing_time = f'0 1000 {1000 + 1 * annealing_time_steps} {1000 + 2 * annealing_time_steps} {1000 * 2 + 2 * annealing_time_steps}'
-        annealing_temp = f'{self.temperature} {self.temperature} {T_high} {self.temperature} {self.temperature}'
+        if not Tg:
+            T_high = self.temperature + T_high_increase
+            annealing_time_steps = int((T_high - self.temperature) / anneal_rate)
+            nsteps_annealing = (1000 * 2 + 2 * annealing_time_steps) * 1000
+            annealing_time = f'0 1000 {1000 + 1 * annealing_time_steps} {1000 + 2 * annealing_time_steps} {1000 * 2 + 2 * annealing_time_steps}'
+            annealing_temp = f'{self.temperature} {self.temperature} {T_high} {self.temperature} {self.temperature}'
+        else:
+            annealing_temp = []
+            annealing_time = []
+
+            current_T = T_init
+            current_t = 0.0
+
+            annealing_temp.append(current_T)
+            annealing_time.append(int(current_t))
+
+            while current_T > T_final:
+                current_t += eq_time * 1000.0
+                annealing_temp.append(current_T)
+                annealing_time.append(int(current_t))
+
+                next_T = current_T - delta_T
+                if next_T < T_final:
+                    next_T = T_final
+
+                ramp_time_ps = (delta_T / anneal_rate)
+                current_t += ramp_time_ps
+                annealing_temp.append(next_T)
+                annealing_time.append(int(current_t))
+
+                current_T = next_T
+                if current_T <= T_final:
+                    break
+
+            current_t += eq_time * 1000.0
+            annealing_temp.append(T_final)
+            annealing_time.append(int(current_t))
+
+            nsteps_annealing = int(annealing_time[-1] / 0.001)
+            anneal_npoints = len(annealing_temp)
+
+            annealing_time = " ".join(str(t) for t in annealing_time)
+            annealing_temp = " ".join(str(T) for T in annealing_temp)
 
         file_contents = "; npt_anneal.mdp - used as input into grompp to generate npt_anneal.tpr\n"
         file_contents += "; Created by PEMD\n\n"
@@ -391,17 +440,17 @@ class PEMDGROMACS:
             ]
         return self
 
-    def commands_npt_anneal(self, input_gro, ):
+    def commands_npt_anneal(self, input_gro, output_str,):
 
         if self.gpu == True:
             self.commands = [
-                f"gmx grompp -f {self.work_dir}/npt_anneal.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/npt_anneal.tpr -maxwarn 1",
-                f"gmx mdrun -v -deffnm {self.work_dir}/npt_anneal -ntmpi 1 -ntomp 5",
+                f"gmx grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
+                f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 5",
             ]
         else:
             self.commands = [
-                f"gmx_mpi grompp -f {self.work_dir}/npt_anneal.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/npt_anneal.tpr -maxwarn 1",
-                f"gmx_mpi mdrun -v -deffnm {self.work_dir}/npt_anneal -ntomp 64",
+                f"gmx_mpi grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
+                f"gmx_mpi mdrun -v -deffnm {self.work_dir}/{output_str} -ntomp 64",
             ]
         return self
 
@@ -456,23 +505,4 @@ class PEMDGROMACS:
                 print(f"Error executing command: {cmd}\n{e.stderr}")
                 break
 
-    # def gen_slurm(self, script_name, job_name, nodes, ntasks_per_node, partition):
-    #     slurm_script = PEMDSlurm(
-    #         self.work_dir,
-    #         script_name,
-    #     )
-    #
-    #     # Add each command in self.commands to the SLURM script
-    #     for cmd in self.commands:
-    #         slurm_script.add_command(cmd)
-    #
-    #     # Generate the SLURM script with the accumulated commands
-    #     script_path = slurm_script.generate_script(
-    #         job_name=job_name,
-    #         nodes=nodes,
-    #         ntasks_per_node=ntasks_per_node,
-    #         partition=partition,
-    #     )
-    #
-    #     print(f"SLURM script generated successfully: {script_path}")
-    #     return script_path
+

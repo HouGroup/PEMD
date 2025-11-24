@@ -1,0 +1,22 @@
+tolerance 2.0
+add_box_sides 1.2
+output pack_cell.pdb
+filetype pdb
+
+seed 8377
+
+structure PEO.pdb
+  number 11
+  inside box 0.0 0.0 0.0 91.55 91.55 91.55
+end structure
+
+structure Li.pdb
+  number 100
+  inside box 0.0 0.0 0.0 91.55 91.55 91.55
+end structure
+
+structure TFSI.pdb
+  number 100
+  inside box 0.0 0.0 0.0 91.55 91.55 91.55
+end structure
+

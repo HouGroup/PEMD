@@ -500,6 +500,10 @@ def get_cluster_index(
             other_criteria = parse_selection_string(select_dict[name])
             comp_idxs = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetProp('resname') == other_criteria['resname']]
             other_atom_indices.extend(comp_idxs)
+    print(f"Center atom indices: {center_atom_indices}")
+    print(f"Selected atom indices: {selected_atom_indices}")
+    print(f"Other atom indices: {other_atom_indices}")
+    print(f"c_idx_list: {c_idx_list}")
 
     return sorted(c_idx_list), sorted(center_atom_indices), sorted(selected_atom_indices), sorted(other_atom_indices)
 
@@ -559,8 +563,6 @@ def get_cluster_index(
 #     if best is not None:
 #         # return list(best), connected_idxs[0], connected_idxs[1]-1
 #         return list(best), start_atom, connected_idxs[1]-1
-from rdkit import Chem
-import numpy as np
 
 def _plainize_mol(m: Chem.Mol) -> Chem.Mol:
     m2 = Chem.Mol(m)

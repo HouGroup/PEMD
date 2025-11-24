@@ -1,0 +1,56 @@
+; nvt.mdp - used as input into grompp to generate nvt.tpr
+; Created by PEMD
+
+; RUN CONTROL PARAMETERS
+integrator            = md
+dt                    = 0.001 
+nsteps                = 400000000
+comm-mode             = Linear
+
+; OUTPUT CONTROL OPTIONS
+nstxout               = 0
+nstvout               = 0
+nstfout               = 0
+nstlog                = 5000
+nstenergy             = 5000
+nstxout-compressed    = 5000
+
+; NEIGHBORSEARCHING PARAMETERS
+cutoff-scheme         = verlet
+ns_type               = grid
+nstlist               = 20
+rlist                 = 1.4
+rcoulomb              = 1.4
+rvdw                  = 1.4
+verlet-buffer-tolerance = 0.005
+
+; OPTIONS FOR ELECTROSTATICS AND VDW
+coulombtype           = PME
+vdw_type              = PME
+fourierspacing        = 0.15
+pme_order             = 4
+ewald_rtol            = 1e-05
+
+; OPTIONS FOR WEAK COUPLING ALGORITHMS
+tcoupl                = v-rescale
+tc-grps               = System
+tau_t                 = 1.0
+ref_t                 = 353
+Pcoupl                = no
+Pcoupltype            = isotropic
+tau_p                 = 1.0
+compressibility       = 4.5e-5
+ref_p                 = 1.0
+
+; GENERATE VELOCITIES FOR STARTUP RUN
+gen_vel               = no
+
+; OPTIONS FOR BONDS
+constraints           = hbonds
+constraint_algorithm  = lincs
+unconstrained_start   = no
+shake_tol             = 0.00001
+lincs_order           = 4
+lincs_warnangle       = 30
+morse                 = no
+lincs_iter            = 2

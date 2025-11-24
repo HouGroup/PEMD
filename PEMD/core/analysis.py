@@ -22,6 +22,7 @@ from typing import Optional, Dict
 
 from PEMD.analysis.conductivity import calc_cond_msd, calc_conductivity
 from PEMD.analysis.transfer_number import calc_transfer_number
+from PEMD.analysis.Tg import TgAnanysis as Tg
 from PEMD.analysis.msd import (
     calc_slope_msd,
     create_position_arrays,
@@ -659,7 +660,7 @@ class PEMDAnalysis:
                 success += 1
 
             except Exception as e:
-                # print(f"Error processing file {pdb_file}: {e}")
+                print(f"Error processing file {pdb_file}: {e}")
                 continue
 
         lib.print_output(f'Extracted {success} / {max_number} cluster structures')
@@ -725,6 +726,51 @@ class PEMDAnalysis:
             work_dir,
             log_filename
         )
+
+
+    @staticmethod
+    def TgAnalysis(
+            work_dir,
+            edr_file,
+            T_start,
+            T_end,
+            dT,
+            eq_time,
+            anneal_rate,
+            window_ps,
+            label,
+            lt_Tmin,
+            lt_Tmax,
+            ht_Tmin,
+            ht_Tmax,
+    ):
+
+        analyzer = Tg(
+            work_dir=work_dir,
+            edr_file=edr_file,
+            T_start=T_start,
+            T_end=T_end,
+            dT=dT,
+            eq_time=eq_time,
+            anneal_rate=anneal_rate,
+            window_ps=window_ps,
+        )
+
+        analyzer.load_edr()
+        analyzer.build_tg_data_from_plateaus(min_frames=10)
+        analyzer.save_tg_data("tg_data.csv")
+
+        return analyzer.fit_tg(
+            lt_Tmin=lt_Tmin,
+            lt_Tmax=lt_Tmax,
+            ht_Tmin=ht_Tmin,
+            ht_Tmax=ht_Tmax,
+            label=label,
+            color="tab:blue",
+            marker="o",
+        )
+
+
 
 
 
