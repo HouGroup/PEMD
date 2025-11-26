@@ -114,7 +114,8 @@ def annealing(
     )
 
     gmx.gen_npt_anneal_mdp_file(
-        T_high_increase,
+        Tg=False,
+        T_high_increase= T_high_increase,
         anneal_rate = anneal_rate,
         anneal_npoints = anneal_npoints,
         filename = 'npt_anneal.mdp'
