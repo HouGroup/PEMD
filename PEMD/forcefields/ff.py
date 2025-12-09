@@ -309,62 +309,46 @@ def apply_chg_to_poly(
         end_repeating
     )
 
+    # 只保留一个带 H 的大分子副本
     Chem.SanitizeMol(mol_long)
     mol_poly = Chem.AddHs(mol_long)
 
-    # Match ``left_mol`` within ``mol_poly``
-    left_matches = []
-    rw_mol = Chem.RWMol(mol_poly)
     used_atoms = set()
-    # all_left = list(rw_mol.GetSubstructMatches(left_mol, uniquify=True, useChirality=False))
-    all_left = find_substruct_matches(rw_mol, left_mol)
 
+    # ----- left_mol 匹配 -----
+    left_matches = []
+    all_left = find_substruct_matches(mol_poly, left_mol)  # 直接用 mol_poly
     if all_left:
-        left_match = min(all_left, key=lambda m: sum(m)/len(m))
+        left_match = min(all_left, key=lambda m: sum(m) / len(m))
         left_matches.append(left_match)
         used_atoms.update(left_match)
     print(f"Matches for left_mol: {left_matches}")
 
-    # Match ``right_mol`` within ``mol_poly``
+    # ----- right_mol 匹配 -----
     right_matches = []
-    rw_mol = Chem.RWMol(mol_poly)
-    # all_right = list(rw_mol.GetSubstructMatches(right_mol, uniquify=True, useChirality=False))
-    all_right = find_substruct_matches(rw_mol, right_mol)
+    all_right = find_substruct_matches(mol_poly, right_mol)  # 不再构造 RWMol
     if all_right:
-        right_match = max(all_right, key=lambda m: sum(m)/len(m))
+        right_match = max(all_right, key=lambda m: sum(m) / len(m))
         if not any(atom_idx in used_atoms for atom_idx in right_match):
             right_matches.append(right_match)
             used_atoms.update(right_match)
     print(f"Matches for right_mol: {right_matches}")
 
-    # Assign partial charges for the matching atoms in ``mol_poly``
-    assign_partial_charges(mol_poly, left_mol, left_matches)
-    assign_partial_charges(mol_poly, right_mol, right_matches)
-
-    # Match ``mid_mol`` to the repeating units in ``mol_poly`` and assign charges
+    # ----- mid_mol 匹配 -----
     mid_matches = []
-    for match in select_non_overlapping_matches(
-            find_substruct_matches(rw_mol, mid_mol),
-            used_atoms,
-    ):
-    # for match in rw_mol.GetSubstructMatches(mid_mol, uniquify=True, useChirality=False):
-    #     if any(atom_idx in used_atoms for atom_idx in match):
-    #         continue  # Skip overlapping matches
+    raw_mid_matches = find_substruct_matches(mol_poly, mid_mol)
+    for match in select_non_overlapping_matches(raw_mid_matches, used_atoms):
         mid_matches.append(match)
-        used_atoms.update(match)  # Mark atoms as used
+        used_atoms.update(match)
     print(f"Matches for mid_mol: {mid_matches}")
 
-    # Assign partial charges to the ``mid_mol`` matches
+    # 后面代码不变：
+    assign_partial_charges(mol_poly, left_mol, left_matches)
+    assign_partial_charges(mol_poly, right_mol, right_matches)
     assign_partial_charges(mol_poly, mid_mol, mid_matches)
 
-    # Extract the updated charges into a DataFrame
     charge_update_df = mol_to_charge_df(mol_poly)
-    # print(charge_update_df)
-
-    # Charge neutralize and scale
-    charge_update_df_cor = charge_neutralize_scale(charge_update_df, scale, charge, )
-
-    # Update the itp file
+    charge_update_df_cor = charge_neutralize_scale(charge_update_df, scale, charge)
     update_itp_file(MD_dir, itp_file, charge_update_df_cor)
 
 

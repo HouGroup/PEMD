@@ -113,6 +113,13 @@ def annealing(
         filename = 'nvt.mdp'
     )
 
+    gmx.gen_npt_mdp_file(
+        nsteps_npt = 1000000,
+        filename='npt.mdp',
+        pression=15,  # in bar
+        temperature=1000,
+    )
+
     gmx.gen_npt_anneal_mdp_file(
         Tg=False,
         T_high_increase= T_high_increase,
@@ -127,8 +134,6 @@ def annealing(
 
     gmx.commands_pdbtogro(
         packmol_pdb,
-        # density,
-        # add_length
     ).run_local()
 
     gmx.commands_em(
@@ -140,8 +145,13 @@ def annealing(
         output_str = 'nvt'
     ).run_local()
 
-    gmx.commands_npt_anneal(
+    gmx.commands_npt(
         input_gro = 'nvt.gro',
+        output_str = 'npt'
+    ).run_local()
+
+    gmx.commands_npt_anneal(
+        input_gro = 'npt.gro',
         output_str = 'npt_anneal'
     ).run_local()
 

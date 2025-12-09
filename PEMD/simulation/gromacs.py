@@ -156,7 +156,16 @@ class PEMDGROMACS:
             file.write(file_contents)
         print(f"NVT mdp file generation successful：{filename}\n")
 
-    def gen_npt_mdp_file(self, nsteps_npt = 5000000, filename = 'npt.mdp', ):
+    def gen_npt_mdp_file(self, nsteps_npt = 5000000, filename = 'npt.mdp', pression: float | None = None, temperature: float | None = None,):
+
+        if pression is None:
+            ref_p = 1.0
+        else:
+            ref_p = pression
+        if temperature is None:
+            ref_t = self.temperature
+        else:
+            ref_t = temperature
 
         filepath = os.path.join(self.work_dir, filename)
 
@@ -197,12 +206,12 @@ class PEMDGROMACS:
         file_contents += "tcoupl                = v-rescale\n"
         file_contents += "tc-grps               = System\n"
         file_contents += "tau_t                 = 1.0\n"
-        file_contents += f"ref_t                 = {self.temperature}\n"
+        file_contents += f"ref_t                 = {ref_t}\n"
         file_contents += "Pcoupl                = Berendsen\n"
         file_contents += "Pcoupltype            = isotropic\n"
         file_contents += "tau_p                 = 1.0\n"
         file_contents += "compressibility       = 4.5e-5\n"
-        file_contents += "ref_p                 = 1.0\n\n"
+        file_contents += f"ref_p                 = {ref_p}\n\n"
 
         file_contents += "; GENERATE VELOCITIES FOR STARTUP RUN\n"
         file_contents += "gen_vel               = no\n\n"

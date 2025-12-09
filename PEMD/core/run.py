@@ -324,7 +324,8 @@ class MDRun:
     def relax_poly_chain_from_json(
         work_dir: Path | str,
         json_file: str,
-        pdb_file: str,
+        *,
+        pdb_file: str | None = None,
         temperature: int = 1000,
         gpu: bool = False,
     ):
@@ -333,6 +334,9 @@ class MDRun:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         poly = data["polymer"]
+
+        if pdb_file is None:
+            pdb_file = f"{poly['name']}_N{poly['length'][1]}.pdb"
 
         return relax_poly_chain(
             work_dir,

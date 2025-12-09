@@ -934,24 +934,24 @@ def check_3d_structure(
     confId=0,
     dist_min=0.7,
     bond_s=2.7, bond_a=1.9, bond_d=1.8, bond_t=1.4,
-    wrap=True,
-    # —— 新增：苯环中心“侵入”检测参数 ——
-    check_ring_center=True,
-    ring_center_r_min=1.2,    # 平面内到环中心的最小允许半径（Å）
-    ring_center_h_tol=0.8,    # 距离环面的容差（Å）：越小越严格
-    exclude_bonded=False      # 是否排除与环上原子直接成键的原子（一般无必要）
+    # —— 改成苯环面积检查 ——
+    check_ring_area=True,
+    ring_area_max=6.0,      # ⭐ 苯环面积阈值：>6 Å² 视为不合理
+    enforce_fh=False,
+    fh_min=1.8,
+    auto_fix_fh=True,      # 如果你后面还要用自动修 F–H，就保留
 ):
     coord = np.array(mol.GetConformer(confId).GetPositions())
-    # if wrap and hasattr(mol, 'cell'):
-    #     coord = calc.wrap(coord, mol.cell.xhi, mol.cell.xlo, mol.cell.yhi, mol.cell.ylo, mol.cell.zhi, mol.cell.zlo)
 
     dist_m = distance_matrix(coord)
     dist_m = np.where(dist_m == 0, dist_min, dist_m)
 
-    # 1) 键长检查
+    # ========== 1) 键长检查 ==========
     bond_l_c = True
     for b in mol.GetBonds():
-        bond_l = dist_m[b.GetBeginAtom().GetIdx(), b.GetEndAtom().GetIdx()]
+        i = b.GetBeginAtom().GetIdx()
+        j = b.GetEndAtom().GetIdx()
+        bond_l = dist_m[i, j]
         bt = b.GetBondTypeAsDouble()
         if (bt == 1.0 and bond_l > bond_s) or \
            (bt == 1.5 and bond_l > bond_a) or \
@@ -960,46 +960,139 @@ def check_3d_structure(
             bond_l_c = False
             break
 
-    # 2) 苯环中心“侵入”检查
-    ring_center_ok = True
-    if check_ring_center:
+    # ========== 2) 苯环面积检查 ==========
+    ring_area_ok = True
+    ring_areas = []
+
+    if check_ring_area:
         rings = _benzene_rings(mol)
         if rings:
-            N = mol.GetNumAtoms()
-            # 若需要排除与环上原子直接成键的原子
-            ring_neighbors_cache = {}
-            if exclude_bonded:
-                for r in rings:
-                    rset = set(r)
-                    nbs = set()
-                    for i in r:
-                        ai = mol.GetAtomWithIdx(i)
-                        for nb in ai.GetNeighbors():
-                            nbs.add(nb.GetIdx())
-                    ring_neighbors_cache[tuple(sorted(r))] = (rset, nbs)
-
             for r in rings:
-                center, normal = _ring_center_normal(mol, r, confId=confId)
-                rset = set(r)
-                # 逐原子检测
-                for idx in range(N):
-                    if idx in rset:
-                        continue
-                    if exclude_bonded:
-                        rset_, nbs = ring_neighbors_cache[tuple(sorted(r))]
-                        if idx in nbs:
-                            continue
-                    v = coord[idx] - center
-                    h = abs(np.dot(v, normal))                 # 到环面的垂直距离
-                    radial = np.linalg.norm(v - h * normal)     # 在环面内到中心的半径
-                    if (h < ring_center_h_tol) and (radial < ring_center_r_min):
-                        ring_center_ok = False
-                        break
-                if not ring_center_ok:
+                area = _ring_area(mol, r, confId=confId)
+                ring_areas.append(area)
+                # 如果某个苯环面积 > ring_area_max，直接不通过
+                if area > ring_area_max:
+                    ring_area_ok = False
+                    # 你可以打印调试信息：
+                    # print(f"[WARN] Benzene ring area too large: {area:.3f} Å^2, ring={r}")
                     break
 
-    check = (dist_m.min() >= dist_min) and bond_l_c and ring_center_ok
+    # ========== 3) 非键合 F–H 距离检查（可选自动修复） ==========
+    fh_ok = True
+    if enforce_fh:
+        symbols = [atom.GetSymbol() for atom in mol.GetAtoms()]
+
+        bonded_pairs = set()
+        for b in mol.GetBonds():
+            i = b.GetBeginAtomIdx()
+            j = b.GetEndAtomIdx()
+            bonded_pairs.add((i, j))
+            bonded_pairs.add((j, i))
+
+        F_indices = [i for i, s in enumerate(symbols) if s == "F"]
+        H_indices = [i for i, s in enumerate(symbols) if s == "H"]
+
+        for i in F_indices:
+            for j in H_indices:
+                if (i, j) in bonded_pairs:
+                    continue  # 跳过成键 F–H
+
+                # 每次用最新坐标算距离
+                coord = np.array(mol.GetConformer(confId).GetPositions())
+                dist_m = distance_matrix(coord)
+                dist_m = np.where(dist_m == 0, dist_min, dist_m)
+
+                d_ij = dist_m[i, j]
+                if d_ij < fh_min:
+                    if auto_fix_fh:
+                        ok = _separate_FH_pair(
+                            mol,
+                            idx_F=i,
+                            idx_H=j,
+                            target_dist=fh_min,
+                            margin=0.05,
+                            confId=confId,
+                        )
+                        if not ok:
+                            fh_ok = False
+                            break
+                    else:
+                        fh_ok = False
+                        break
+            if not fh_ok:
+                break
+
+    # ========== 4) 总体检查 ==========
+    # ⭐ 这里把 fh_ok 和 ring_area_ok 都加进去
+    coord = np.array(mol.GetConformer(confId).GetPositions())
+    dist_m = distance_matrix(coord)
+    dist_m = np.where(dist_m == 0, dist_min, dist_m)
+
+    check = (dist_m.min() >= dist_min) and bond_l_c and ring_area_ok and fh_ok
     return check
+
+def _separate_FH_pair(mol, idx_F, idx_H,
+                      target_dist: float,
+                      margin: float = 0.00,
+                      confId: int = 0) -> bool:
+    conf = mol.GetConformer(confId)
+    pos_F = np.array(conf.GetAtomPosition(idx_F), dtype=float)
+    pos_H = np.array(conf.GetAtomPosition(idx_H), dtype=float)
+
+    v_FH = pos_H - pos_F
+    d = np.linalg.norm(v_FH)
+    if d < 1e-6:
+        # F 和 H 几乎重合，方向不好定义
+        return False
+
+    v_dir = v_FH / d
+    desired = target_dist + margin
+    delta = desired - d
+    if delta <= 0:
+        # 已经够远，不用动
+        return True
+
+    # 两个原子各位移一半
+    shift_F = -0.5 * delta * v_dir
+    shift_H = +0.5 * delta * v_dir
+
+    new_F = pos_F + shift_F
+    new_H = pos_H + shift_H
+
+    conf.SetAtomPosition(idx_F, Point3D(*new_F))
+    conf.SetAtomPosition(idx_H, Point3D(*new_H))
+    return True
+
+def _ring_area(mol: Chem.Mol, ring_idx_list, confId=0) -> float:
+    """
+    计算一个苯环（6 元芳香碳）的面积，单位 Å^2。
+
+    简要做法：
+    1. 取环上 6 个原子的 3D 坐标；
+    2. 用 SVD 求出环面的法向量；
+    3. 在该平面上构造 2D 坐标 (u, v)；
+    4. 用多边形面积公式（shoelace formula）算面积。
+    """
+    conf = mol.GetConformer(confId)
+    pts = np.array([conf.GetAtomPosition(i) for i in ring_idx_list], dtype=float)  # (6, 3)
+    center = pts.mean(axis=0)
+    P = pts - center  # 去中心化
+
+    # 用 SVD 求平面法向量
+    _, _, vh = np.linalg.svd(P, full_matrices=False)
+    normal = vh[-1]
+    normal = normal / (np.linalg.norm(normal) + 1e-12)
+
+    # 在环面上构造 2D 基底（利用你已有的 _orthonormal_basis）
+    u, v = _orthonormal_basis(normal)   # 两个互相正交并与 normal 正交的单位向量
+
+    # 投影到 (u, v) 平面，得到 2D 坐标
+    xs = P @ u   # (6,)
+    ys = P @ v   # (6,)
+
+    # Shoelace formula
+    area = 0.5 * np.abs(np.dot(xs, np.roll(ys, -1)) - np.dot(ys, np.roll(xs, -1)))
+    return float(area)
 
 def calculate_box_size(numbers, pdb_files, density):
     total_mass = 0
