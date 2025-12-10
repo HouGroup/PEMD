@@ -164,39 +164,66 @@ def gen_ff_from_data(work_dir, compound_name, corr_factor, target_sum_chg):
 
 from rdkit import Chem
 from rdkit.Chem.rdchem import KekulizeException
-
+BENZENE_PATTERN = Chem.MolFromSmarts("c1ccccc1")
 def find_substruct_matches(
     target_mol,
     query_mol,
     *,
-    uniquify=False,
+    uniquify=True,               # 形式上保留这个参数，但会被“苯环检测”自动覆盖
     ignore_stereo=True,          # 忽略手性/顺反（默认更宽松）
-    allow_aromatic_conj=True,    # 芳香↔共轭兼容（新版本更稳）
-    match_hs=True,               # 显式氢也参与匹配（和你“保持氢”的需求一致）
-    try_remove_stereo=True       # 第一层回退：移除立体信息
+    allow_aromatic_conj=True,    # 芳香↔共轭兼容
+    match_hs=True,               # 显式氢参与匹配
+    try_remove_stereo=True       # 回退：移除立体信息
 ):
-    """Return substructure matches with robust fallbacks and cross-version guards."""
+    """
+    Return substructure matches with robust fallbacks and cross-version guards.
+
+    逻辑调整：
+    - 如果 target_mol 中含有苯环 (c1ccccc1)，则强制使用 uniquify=False
+    - 否则使用 uniquify=True
+    """
+
     if target_mol is None or query_mol is None:
         return []
 
-    # --- 小工具：跨版本获取匹配，保证确定性排序 ---
+    # ===== 1. 根据是否含苯环自动决定 uniquify =====
+    auto_uniquify = True
+    if target_mol is not None and BENZENE_PATTERN is not None:
+        if target_mol.HasSubstructMatch(BENZENE_PATTERN):
+            # 含苯环：不过滤对称映射 → 匹配更多
+            auto_uniquify = False
+        else:
+            auto_uniquify = True
+
+    # 如果你就是想“完全交给苯环检测”，可以直接用 auto_uniquify 覆盖传入参数：
+    uniquify = auto_uniquify
+
+    # ===== 2. 小工具：跨版本获取匹配，保证确定性排序 =====
     def _get_matches(t, q, params):
         try:
-            ms = list(t.GetSubstructMatches(q, params=params))
+            # 新版 RDKit 支持 params=
+            ms = t.GetSubstructMatches(q, params=params)
         except TypeError:
             # 老版本 RDKit 没有 params=，退化为手动传常用参数
-            ms = list(t.GetSubstructMatches(
+            ms = t.GetSubstructMatches(
                 q,
                 useChirality=getattr(params, 'useChirality', False),
-                uniquify=uniquify
-            ))
-        # 确定性排序：先按长度，再按元组字典序
-        return sorted(ms, key=lambda m: (len(m), m))
+                uniquify=uniquify,
+            )
 
-    # --- 优先路径：使用 SubstructMatchParameters 控制开关 ---
+        if not ms:
+            return []
+
+        ms = list(ms)
+        if len(ms) > 1:
+            # 确定性排序：先按长度，再按元组字典序
+            ms.sort(key=lambda m: (len(m), m))
+        return ms
+
+    # ===== 3. 构造 SubstructMatchParameters =====
     p = Chem.SubstructMatchParameters()
-    # 顶层开关
     p.uniquify = uniquify
+
     if hasattr(p, 'useChirality'):
         p.useChirality = not ignore_stereo
     if hasattr(p, 'useEnhancedStereo'):
@@ -206,35 +233,42 @@ def find_substruct_matches(
     if hasattr(p, 'useHs'):
         p.useHs = match_hs
     if hasattr(p, 'maxMatches'):
-        p.maxMatches = 0  # 0 = 不限数量
+        p.maxMatches = 0  # 0 = 不限数量（注意：匹配太多时会吃内存）
 
-    # 直匹配
+    # ===== 4. 直匹配 =====
     matches = _get_matches(target_mol, query_mol, p)
     if matches:
         return matches
 
-    # --- 回退 1：完全去除立体信息再匹配（更宽容的等价拓扑） ---
+    # ===== 5. 回退 1：去立体信息 =====
     if try_remove_stereo:
-        t2 = Chem.Mol(target_mol); Chem.RemoveStereochemistry(t2)
-        q2 = Chem.Mol(query_mol);  Chem.RemoveStereochemistry(q2)
+        t2 = Chem.Mol(target_mol)
+        q2 = Chem.Mol(query_mol)
+        Chem.RemoveStereochemistry(t2)
+        Chem.RemoveStereochemistry(q2)
+
         matches = _get_matches(t2, q2, p)
+        del t2, q2
         if matches:
             return matches
 
-    # --- 回退 2：Kekulize，清除芳香标记再匹配（应对芳香/共轭体系差异） ---
+    # ===== 6. 回退 2：Kekulize，清芳香标记 =====
     t3 = Chem.Mol(target_mol)
     q3 = Chem.Mol(query_mol)
     try:
         Chem.Kekulize(t3, clearAromaticFlags=True)
         Chem.Kekulize(q3, clearAromaticFlags=True)
     except KekulizeException:
+        del t3, q3
         return []
 
-    # 清了芳香标记后，必要时把 aromaticMatchesConjugated 关掉
     if hasattr(p, 'aromaticMatchesConjugated'):
         p.aromaticMatchesConjugated = False
 
-    return _get_matches(t3, q3, p)
+    matches = _get_matches(t3, q3, p)
+    del t3, q3
+    return matches
+
 
 def select_non_overlapping_matches(matches, used_atoms=None):
     """Select non-overlapping matches in a deterministic order."""

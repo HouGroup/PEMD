@@ -4,7 +4,7 @@
 #SBATCH -n 64
 #SBATCH -p standard
 
-conda activate foyer 
+conda activate pemd
 module load GROMACS 
 module load Gaussian
 
