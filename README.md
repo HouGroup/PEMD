@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/pemd.tif" alt="PEMD logo" width="180">
+  <img src="docs/pemd.png" alt="PEMD logo" width="180">
 </p>
 
 # Polymer Electrolyte Modeling and Discovery (PEMD)
