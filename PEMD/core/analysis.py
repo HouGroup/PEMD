@@ -272,8 +272,8 @@ class PEMDAnalysis:
 
     def get_rdf_coordination_array(self, group1_name, group2_name):
 
-        group1 = self.run_wrap.select_atoms(group1_name)
-        group2 = self.run_wrap.select_atoms(group2_name)
+        group1 = self.run_wrap.select_atoms(self.select_dict.get(group1_name))
+        group2 = self.run_wrap.select_atoms(self.select_dict.get(group2_name))
         bins, rdf, coord_number = calc_rdf_coord(
             group1,
             group2,
