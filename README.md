@@ -148,15 +148,12 @@ These utilities consume standard MD trajectories (e.g., XTC, DCD) and topology f
 
 ## Citation
 
-If PEMD is helpful for your research, please cite our paper:
-
-> S. Tan, T. Hou\*, et al., *PEMD: An open-source framework for high-throughput simulation and analysis of polymer electrolytes*, 2025.  
-> (An updated citation with DOI will be provided upon publication.)
+If this work is helpful for your research, please cite our paper.
 
 ```bibtex
-@article{tan2025pemd,
+@article{tan2026pemd,
   title   = {PEMD: An open-source framework for high-throughput simulation and analysis of polymer electrolytes},
-  author  = {Tan, Shendong and Hou, Tingzheng and others},
+  author  = {Tan, Shendong and Liang, Bochun and Lu, Dexin and Ji, Chaoyuan and Jia, Wenke and Li, Zihui and Hou, Tingzheng},
   journal = {Digital Discovery},
   year    = {2026},
   DOI     = {10.1039/D5DD00454C},
