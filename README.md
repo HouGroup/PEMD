@@ -141,6 +141,9 @@ Modules under `PEMD.analysis` implement commonly used observables for polymer el
 
 These utilities consume standard MD trajectories (e.g., XTC, DCD) and topology files. Consult in-code docstrings for details about expected input formats.
 
+## Contact
+For questions, feature requests, or collaboration opportunities, please contact the PEMD development team at [tsd23@mails.tsinghua.edu.cn].
+
 ## Citation
 
 If this work is helpful for your research, please cite our paper.
@@ -154,5 +157,3 @@ If this work is helpful for your research, please cite our paper.
   DOI     = {10.1039/D5DD00454C},
 }
 
-## Contact
-For questions, feature requests, or collaboration opportunities, please contact the PEMD development team at [tsd23@mails.tsinghua.edu.cn].
