@@ -147,11 +147,20 @@ These utilities consume standard MD trajectories (e.g., XTC, DCD) and topology f
 - **Contributing:** fork the repository, create feature branches, and submit pull requests describing your changes. Bug reports and feature requests are welcome via the issue tracker.
 
 ## Citation
-If PEMD contributes to your research, please cite:
 
-> S. Tan, T. Hou*, et al., *PEMD: An open-source framework for high-throughput simulation and analysis of polymer electrolytes*, 2025.
+If PEMD is helpful for your research, please cite our paper:
 
-(An updated citation with DOI will be provided upon publication.)
+> S. Tan, T. Hou\*, et al., *PEMD: An open-source framework for high-throughput simulation and analysis of polymer electrolytes*, 2025.  
+> (An updated citation with DOI will be provided upon publication.)
+
+```bibtex
+@article{tan2025pemd,
+  title   = {PEMD: An open-source framework for high-throughput simulation and analysis of polymer electrolytes},
+  author  = {Tan, Shendong and Hou, Tingzheng and others},
+  journal = {Digital Discovery},
+  year    = {2026},
+  DOI     = {10.1039/D5DD00454C},
+}
 
 ## Contact
 For questions, feature requests, or collaboration opportunities, please contact the PEMD development team at [tsd23@mails.tsinghua.edu.cn].
