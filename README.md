@@ -141,11 +141,6 @@ Modules under `PEMD.analysis` implement commonly used observables for polymer el
 
 These utilities consume standard MD trajectories (e.g., XTC, DCD) and topology files. Consult in-code docstrings for details about expected input formats.
 
-## Development
-- **Formatting & linting:** please adhere to [PEP 8](https://peps.python.org/pep-0008/) conventions. Configure your editor to use black (line length 88) and isort if contributing substantial changes.
-- **Testing:** add or update unit tests alongside new features whenever possible. Run `pytest` (and any custom workflow regression tests) before submitting a pull request.
-- **Contributing:** fork the repository, create feature branches, and submit pull requests describing your changes. Bug reports and feature requests are welcome via the issue tracker.
-
 ## Citation
 
 If this work is helpful for your research, please cite our paper.
