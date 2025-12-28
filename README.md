@@ -164,9 +164,3 @@ If PEMD is helpful for your research, please cite our paper:
 
 ## Contact
 For questions, feature requests, or collaboration opportunities, please contact the PEMD development team at [tsd23@mails.tsinghua.edu.cn].
-
-
-
-
-
-
