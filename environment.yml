@@ -3,15 +3,22 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.10
-  - jupyter
-  - gmso=0.12.0
-  - pip
-  - openbabel=3.1.1
-  - scipy=1.12.0
-  - py3dmol=2.0.4
-  - xtb=6.6.1
-  - packmol=20.010
+  - python=3.10.14=hd12c33a_0_cpython
+  - pip=24.2=py310h06a4308_0
+  - numpy=1.26.4=py310hb13e2d6_0
+  - gmso=0.12.0=pyhd8ed1ab_0
+  - openbabel=3.1.1=py310hbff9852_9
+  - py3dmol=2.0.4=pyhd8ed1ab_0
+  - xtb=6.6.1=hf49bc11_0
+  - packmol=20.14.4=ha36c22a_0
   - pip:
+      - scipy==1.15.3
       - ase==3.26.0
       - fairchem-core==2.7.1
+      - jupyter==1.0.0
+      - jupyter-client==7.4.9
+      - jupyter-console==6.6.3
+      - jupyter-core==4.12.0
+      - jupyter-server==1.24.0
+      - jupyterlab-pygments==0.2.2
+      - jupyterlab-widgets==3.0.8
