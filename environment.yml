@@ -13,4 +13,5 @@ dependencies:
   - xtb=6.6.1
   - packmol=20.010
   - pip:
-      - requests
+      - ase==3.26.0
+      - fairchem-core==2.7.1
