@@ -1,6 +1,6 @@
 # Polymer Electrolyte Modeling and Discovery (PEMD)
 
-Polymer Electrolyte Modeling and Discovery (PEMD) is a Python toolkit for building, simulating, and analyzing polymer-electrolyte systems. The package wraps together quantum-chemistry (QM), molecular-dynamics (MD), and post-processing workflows so that you can go from a SMILES description of a repeat unit all the way to transport-property analysis with a single, reproducible input file
+Polymer Electrolyte Modeling and Discovery (PEMD) is a Python toolkit for building, simulating, and analyzing solid polymer electrolytes.  It supports an end-to-end workflow spanning four core stages: polymer structure generation, OPLS-AA force-field parameterization, multiscale simulation, and physicochemical property analysis.
 
 <p align="center">
   <img src="docs/pemd.png" alt="PEMD logo" width="800">
