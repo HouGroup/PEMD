@@ -51,13 +51,13 @@ PEMD_DEV/
 ### Installation
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/<your-org>/PEMD.git
+   git clone https://github.com/HouGroup/PEMD.git
    cd PEMD
    ```
 2. **Create the recommended environment**
    ```bash
    conda env create -f environment.yml
-   conda activate pemd-test
+   conda activate pemd
    ```
 3. **Install PEMD in editable mode**
    ```bash

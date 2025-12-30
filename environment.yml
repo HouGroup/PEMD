@@ -1,4 +1,4 @@
-name: pemd-test
+name: pemd
 channels:
   - conda-forge
   - defaults
