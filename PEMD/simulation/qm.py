@@ -43,7 +43,29 @@ def gen_conf_rdkit(
 
     if pdb_file:
         pdb_path = work_path / pdb_file
-        mol = Chem.MolFromPDBFile(str(pdb_path), removeHs=False)
+        mol = Chem.MolFromPDBFile(
+            str(pdb_path),
+            removeHs=False,
+        )
+
+        if mol is None:
+            raise ValueError(f"Failed to read PDB: {pdb_path}")
+
+        n_atoms_before = mol.GetNumAtoms()
+        mol_with_h = Chem.AddHs(mol, addCoords=True)
+        n_atoms_after = mol_with_h.GetNumAtoms()
+
+        # PEMD 自己生成的 PDB 本来已经含有全部氢；
+        # 再次增加氢通常说明键级丢失
+        if n_atoms_after != n_atoms_before:
+            raise ValueError(
+                f"Bond-order validation failed for {pdb_path}: "
+                f"AddHs changed atom count "
+                f"{n_atoms_before} -> {n_atoms_after}. "
+                "The PDB may contain incorrect bond orders."
+            )
+
+        mol = mol_with_h
     elif smiles:
         mol = Chem.MolFromSmiles(smiles)
 

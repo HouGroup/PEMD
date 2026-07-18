@@ -1,4 +1,5 @@
 import os
+import random
 import subprocess
 
 
@@ -156,7 +157,16 @@ class PEMDGROMACS:
             file.write(file_contents)
         print(f"NVT mdp file generation successful：{filename}\n")
 
-    def gen_npt_mdp_file(self, nsteps_npt = 5000000, filename = 'npt.mdp', pression: float | None = None, temperature: float | None = None,):
+    def gen_npt_mdp_file(
+            self,
+            nsteps_npt = 5000000,
+            filename = 'npt.mdp',
+            pression: float | None = None,
+            temperature: float | None = None,
+            gen_vel: bool = True,
+            gen_seed: int | None = None,
+            ld_seed: int | None = None,
+    ):
 
         if pression is None:
             ref_p = 1.0
@@ -166,6 +176,12 @@ class PEMDGROMACS:
             ref_t = self.temperature
         else:
             ref_t = temperature
+
+        if gen_seed is None:
+            gen_seed = random.randint(1, 2_000_000_000)
+
+        if ld_seed is None:
+            ld_seed = random.randint(1, 2_000_000_000)
 
         filepath = os.path.join(self.work_dir, filename)
 
@@ -214,7 +230,11 @@ class PEMDGROMACS:
         file_contents += f"ref_p                 = {ref_p}\n\n"
 
         file_contents += "; GENERATE VELOCITIES FOR STARTUP RUN\n"
-        file_contents += "gen_vel               = no\n\n"
+        file_contents += f"gen_vel               = {'yes' if gen_vel else 'no'}\n"
+        if gen_vel:
+            file_contents += f"gen_temp              = {ref_t}\n"
+            file_contents += f"gen_seed              = {gen_seed}\n"
+        file_contents += "\n"
 
         file_contents += "; OPTIONS FOR BONDS\n"
         file_contents += "constraints           = hbonds\n"
@@ -228,7 +248,9 @@ class PEMDGROMACS:
 
         with open(filepath, 'w') as file:
             file.write(file_contents)
-        print(f"NPT mdp file generation successful：{filename}\n")
+
+        print(f"NPT mdp file generation successful: {filename}")
+        print(f"gen_seed = {gen_seed}, ld_seed = {ld_seed}\n")
 
     def gen_npt_anneal_mdp_file(
             self,
@@ -398,7 +420,7 @@ class PEMDGROMACS:
         if self.gpu == True:
             self.commands = [
                 f"gmx grompp -f {self.work_dir}/em.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/em.tpr -maxwarn 1",
-                f"gmx mdrun -v -deffnm {self.work_dir}/em -ntmpi 1 -ntomp 5",
+                f"gmx mdrun -v -deffnm {self.work_dir}/em -ntmpi 1 -ntomp 10",
             ]
         else:
             self.commands = [
@@ -412,7 +434,7 @@ class PEMDGROMACS:
         if self.gpu == True:
             self.commands = [
                 f"gmx grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
-                f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 5",
+                f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 10",
             ]
         else:
             self.commands = [
@@ -421,16 +443,16 @@ class PEMDGROMACS:
             ]
         return self
 
-    def commands_nvt_product(self, input_gro, output_str, ):
+    def commands_nvt_product(self, input_gro, input_cpt, output_str, ):
 
         if self.gpu == True:
             self.commands = [
-                f"gmx grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
-                f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 5",
+                f"gmx grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -t {self.work_dir}/{input_cpt} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
+                f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 10",
             ]
         else:
             self.commands = [
-                f"gmx_mpi grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
+                f"gmx_mpi grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -t {self.work_dir}/{input_cpt} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
                 f"mpirun gmx_mpi mdrun -v -deffnm {self.work_dir}/{output_str}",
             ]
         return self
@@ -440,7 +462,7 @@ class PEMDGROMACS:
         if self.gpu == True:
             self.commands = [
                 f"gmx grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
-                f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 5",
+                f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 10",
             ]
         else:
             self.commands = [
@@ -454,7 +476,7 @@ class PEMDGROMACS:
         if self.gpu == True:
             self.commands = [
                 f"gmx grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
-                f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 5",
+                f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 10",
             ]
         else:
             self.commands = [

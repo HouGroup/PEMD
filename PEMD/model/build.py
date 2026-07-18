@@ -67,9 +67,36 @@ def gen_copolymer_3D(smiles_A,
 def mol_to_pdb(work_dir, mol, name, resname, pdb_filename):
     work_path = Path(work_dir)
     pdb_file = work_path / pdb_filename
-    Chem.MolToXYZFile(mol, 'mid.xyz', confId=0)
-    io.convert_xyz_to_pdb('mid.xyz', pdb_file, name, resname)
-    Path("mid.xyz").unlink(missing_ok=True)
+    xyz_file = work_path / f".{pdb_filename}.tmp.xyz"
+
+    # 保留原来的坐标和 residue 生成逻辑
+    Chem.MolToXYZFile(mol, str(xyz_file), confId=0)
+    io.convert_xyz_to_pdb(
+        str(xyz_file),
+        str(pdb_file),
+        name,
+        resname,
+    )
+    xyz_file.unlink(missing_ok=True)
+
+    # 从原始 RDKit Mol 提取可靠的 CONECT 信息
+    rdkit_pdb = Chem.MolToPDBBlock(mol, confId=0)
+    conect_lines = [
+        line for line in rdkit_pdb.splitlines()
+        if line.startswith("CONECT")
+    ]
+
+    # 保留 OpenBabel 的 HETATM、原子名和残基信息，
+    # 只替换可能错误的连接和键级
+    original_lines = pdb_file.read_text().splitlines()
+    body_lines = [
+        line for line in original_lines
+        if not line.startswith(("CONECT", "MASTER", "END"))
+    ]
+
+    pdb_file.write_text(
+        "\n".join(body_lines + conect_lines + ["END"]) + "\n"
+    )
 
 
 def calc_poly_chains(num_Li_salt , conc_Li_salt, mass_per_chain):

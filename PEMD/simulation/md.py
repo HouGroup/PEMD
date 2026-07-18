@@ -116,7 +116,7 @@ def annealing(
     gmx.gen_npt_mdp_file(
         nsteps_npt = 1000000,
         filename='npt.mdp',
-        pression=15,  # in bar
+        pression=40,  # in bar
         temperature=1000,
     )
 
@@ -257,6 +257,7 @@ def run_gmx_prod(
 
     gmx.commands_nvt_product(
         input_gro = 'pre_eq.gro',
+        input_cpt = 'npt_eq.cpt',
         output_str = 'nvt_prod'
     ).run_local()
 
