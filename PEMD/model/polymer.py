@@ -129,11 +129,22 @@ def gen_sequence_copolymer_3D(name,
 
             combined = Chem.CombineMols(connecting_mol, new_unit)
             editable = Chem.EditableMol(combined)
-            head_idx = num_atom + h
-            editable.AddBond(tail_idx, head_idx, order=Chem.rdchem.BondType.SINGLE)
 
-            combined_mol = editable.GetMol()
-            combined_mol = Chem.RWMol(combined_mol)
+            head_idx = num_atom + h
+            editable.AddBond(
+                tail_idx,
+                head_idx,
+                order=Chem.rdchem.BondType.SINGLE,
+            )
+
+            combined_mol = Chem.RWMol(editable.GetMol())
+
+            # The newly formed bond consumes one radical at each polymerization site.
+            consume_connection_radical(combined_mol, tail_idx)
+            consume_connection_radical(combined_mol, head_idx)
+
+            combined_mol.UpdatePropertyCache(strict=False)
+            Chem.SanitizeMol(combined_mol)
 
             # combined_mol.UpdatePropertyCache(strict=False)
             Chem.SanitizeMol(combined_mol)
@@ -767,27 +778,51 @@ def estimate_bond_length(atom_num1: int, atom_num2: int, fallback: float = 1.5) 
         return fallback
     return float(length)
 
+def consume_connection_radical(rw_mol: Chem.RWMol, atom_idx: int) -> None:
+    """Consume one radical electron when a new covalent bond is formed."""
+    atom = rw_mol.GetAtomWithIdx(atom_idx)
+    n_radicals = atom.GetNumRadicalElectrons()
 
-def attach_fragment(base_mol, fragment, terminal_idx, fragment_connection_idx):
+    if n_radicals > 0:
+        atom.SetNumRadicalElectrons(n_radicals - 1)
+
+def attach_fragment(
+    base_mol,
+    fragment,
+    terminal_idx,
+    fragment_connection_idx,
+):
     n_base = base_mol.GetNumAtoms()
+
     combo = Chem.CombineMols(base_mol, fragment)
-    ed = Chem.EditableMol(combo)
+    editable = Chem.EditableMol(combo)
+
     new_idx = fragment_connection_idx + n_base
-    ed.AddBond(terminal_idx, new_idx, order=Chem.rdchem.BondType.SINGLE)
-    combined = ed.GetMol()
+    editable.AddBond(
+        terminal_idx,
+        new_idx,
+        order=Chem.rdchem.BondType.SINGLE,
+    )
 
-    rw = Chem.RWMol(combined)
-    h_inds = [nbr.GetIdx() for nbr in rw.GetAtomWithIdx(new_idx).GetNeighbors()
-              if rw.GetAtomWithIdx(nbr.GetIdx()).GetAtomicNum() == 1]
-    if h_inds:
-        place_h_in_tetrahedral(rw, new_idx, h_inds)
+    rw = Chem.RWMol(editable.GetMol())
 
-    mol_out = rw.GetMol()
-    # 🔧 新增：更新缓存并消毒
-    mol_out.UpdatePropertyCache(strict=False)
-    Chem.SanitizeMol(mol_out)
+    # Consume radicals represented by the removed dummy/[3H] atoms.
+    consume_connection_radical(rw, terminal_idx)
+    consume_connection_radical(rw, new_idx)
 
-    return mol_out
+    h_indices = [
+        nbr.GetIdx()
+        for nbr in rw.GetAtomWithIdx(new_idx).GetNeighbors()
+        if nbr.GetAtomicNum() == 1
+    ]
+
+    if h_indices:
+        place_h_in_tetrahedral(rw, new_idx, h_indices)
+
+    rw.UpdatePropertyCache(strict=False)
+    Chem.SanitizeMol(rw)
+
+    return rw.GetMol()
 
 
 def attach_hydrogen_cap(base_mol: Chem.Mol, terminal_idx: int) -> Chem.Mol:
@@ -888,17 +923,65 @@ def gen_3D_withcap(mol, start_atom, end_atom, length, left_cap_smiles=None, righ
         except Exception as exc:
             logger.warning("Sanitization after capping terminal %s failed: %s", terminal_idx, exc)
 
-    # ✅ 在 MMFF 前再做一道保险
     capped_mol.UpdatePropertyCache(strict=False)
     Chem.SanitizeMol(capped_mol)
 
-    AllChem.MMFFOptimizeMolecule(capped_mol, maxIters=50, confId=0)
-    valid_structure = check_3d_structure(capped_mol)
-    if length <= 3 or valid_structure:
-        return capped_mol
+    remaining_radicals = [
+        (atom.GetIdx(), atom.GetSymbol(), atom.GetNumRadicalElectrons())
+        for atom in capped_mol.GetAtoms()
+        if atom.GetNumRadicalElectrons() > 0
+    ]
 
-    logger.warning("Failed to generate the final PDB file.")
-    return None
+    if remaining_radicals:
+        raise RuntimeError(
+            f"Radicals remain after polymer capping: {remaining_radicals}"
+        )
+
+    # For monomers and short oligomers, rebuild the complete capped geometry.
+    if length <= 3:
+        capped_mol.RemoveAllConformers()
+
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 20
+        params.maxIterations = 1000
+
+        embed_status = AllChem.EmbedMolecule(capped_mol, params)
+
+        if embed_status != 0:
+            params.useRandomCoords = True
+            embed_status = AllChem.EmbedMolecule(capped_mol, params)
+
+        if embed_status != 0:
+            raise RuntimeError("ETKDG failed for the capped polymer")
+
+    properties = AllChem.MMFFGetMoleculeProperties(capped_mol)
+
+    if properties is None:
+        raise RuntimeError("MMFF parameters are unavailable for capped polymer")
+
+    force_field = AllChem.MMFFGetMoleculeForceField(
+        capped_mol,
+        properties,
+        confId=0,
+    )
+
+    if force_field is None:
+        raise RuntimeError("Failed to construct MMFF force field")
+
+    mmff_status = force_field.Minimize(maxIts=1000)
+
+    if mmff_status != 0:
+        logger.warning(
+            "MMFF optimization did not fully converge: status=%s",
+            mmff_status,
+        )
+
+    if not check_3d_structure(capped_mol, dist_min=0.9):
+        raise RuntimeError(
+            "Atomic collision remains after capping and MMFF optimization"
+        )
+
+    return capped_mol
 
 def _benzene_rings(mol: Chem.Mol):
     rings = []
