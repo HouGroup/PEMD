@@ -834,12 +834,16 @@ def attach_hydrogen_cap(base_mol: Chem.Mol, terminal_idx: int) -> Chem.Mol:
     editable_mol = Chem.EditableMol(base_mol)
     new_H_idx = editable_mol.AddAtom(Chem.Atom(1))
     editable_mol.AddBond(terminal_idx, new_H_idx, Chem.BondType.SINGLE)
-    capped = editable_mol.GetMol()
+
+    rw = Chem.RWMol(editable_mol.GetMol())
+    # Adding an H cap forms a new covalent bond at the polymer connection site,
+    # so consume the radical electron left by dummy-atom removal.
+    consume_connection_radical(rw, terminal_idx)
+    capped = rw.GetMol()
 
     conformer = capped.GetConformer()
     conformer.SetAtomPosition(new_H_idx, Point3D(*H_pos))
 
-    # 🔧 关键补充：更新缓存并消毒
     capped.UpdatePropertyCache(strict=False)
     Chem.SanitizeMol(capped)
 
