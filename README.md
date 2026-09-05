@@ -1,92 +1,82 @@
-# Polymer Electrolyte Modeling and Discovery (PEMD)
+# PEMD
 
-Polymer Electrolyte Modeling and Discovery (PEMD) is a Python toolkit for building, simulating, and analyzing solid polymer electrolytes.  It supports an end-to-end workflow spanning four core stages: polymer structure generation, OPLS-AA force-field parameterization, multiscale simulation, and physicochemical property analysis.
+Polymer Electrolyte Modeling and Discovery (PEMD) is a Python package for building, simulating, and analyzing polymer electrolyte systems. It provides workflows for polymer structure generation, OPLS-AA force-field preparation, molecular dynamics simulations, quantum-chemistry calculations, and trajectory analysis.
 
 <p align="center">
-  <img src="docs/pemd.png" alt="PEMD logo" width="800">
+  <img src="docs/pemd.png" alt="PEMD overview" width="800">
 </p>
 
+## Features
 
-## Table of Contents
-- [Key Features](#key-features)
-- [Repository Structure](#repository-structure)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-  - [Quick Start](#quick-start)
-- [Workflows](#workflows)
-- [Analysis Toolkit](#analysis-toolkit)
-- [Development](#development)
-- [Citation](#citation)
-- [License](#license)
-- [Contact](#contact)
+- Build homo- and co-polymer structures from JSON input files.
+- Prepare amorphous simulation boxes with Packmol.
+- Generate OPLS-AA force-field files from LigParGen, RESP charges, or database parameters.
+- Run molecular dynamics workflows with GROMACS, including annealing, production, and Tg simulations.
+- Run quantum-chemistry workflows with RDKit, XTB, Gaussian, Multiwfn, and UMA.
+- Analyze MD trajectories for conductivity, diffusion, transfer number, coordination, residence time, polymer-ion dynamics, and glass-transition temperature.
 
-## Key Features
-- **Polymer builders** – Generate homo- and co-polymer structures directly from JSON configuration files using `PEMD.core.model.PEMDModel`. Automated Packmol integration produces amorphous boxes with user-defined composition and density.
-- **Force-field automation** – Build OPLS-AA force fields from LigParGen, RESP-fitted, or curated database parameters via `PEMD.core.forcefields.Forcefield`. Partial charges can be replaced with RESP charges obtained from PEMD's QM pipeline.
-- **Quantum-chemistry workflows** – Perform conformer searches, XTB refinement, Gaussian single-point or optimization jobs, and RESP charge fitting through the `PEMD.core.run.QMRun` helpers and companion shell scripts.
-- **MD production runs** – Launch annealing and production simulations (GROMACS) with consistent inputs through `PEMD.core.run.MDRun` using only the JSON specification of system composition.
-- **High-throughput orchestration** – Reusable workflow templates (see `workflow/`) chain together structure building, parameterization, QM, and MD steps for large screening campaigns.
-- **Analysis suite** – Property analysis modules (e.g., conductivity, diffusion, residence time, glass-transition temperature) under `PEMD.analysis` accelerate post-processing of simulation trajectories.
+## Repository Layout
 
-## Repository Structure
-```
-PEMD_DEV/
-├── PEMD/                 # Core Python package (modeling, simulation, analysis)
-├── workflow/             # Ready-to-run workflow templates and sample inputs
-├── bin/                  # Helper shell utilities (e.g., RESP charge automation)
-├── environment.yml       # Conda environment for full-featured installations
-├── setup.py              # Package metadata for editable/production installs
-└── README.md             # Project overview and instructions
+```text
+PEMD/
+├── PEMD/                 # Python package
+│   ├── core/             # User-facing model, force-field, run, and analysis APIs
+│   ├── model/            # Polymer construction and packing utilities
+│   ├── forcefields/      # Force-field generation utilities
+│   ├── simulation/       # MD and QM wrappers
+│   └── analysis/         # Trajectory and property analysis
+├── workflow/             # Example workflows and input files
+├── data/                 # Example datasets and simulation files
+├── bin/                  # Helper scripts
+├── environment.yml       # Conda environment
+└── setup.py              # Package metadata
 ```
 
+## Installation
 
-## Getting Started
+PEMD is developed and tested primarily on Linux. macOS is also supported for workflows where the required external programs are available.
 
-### Prerequisites
-- Operating system: Linux (tested) or macOS. Windows users are encouraged to work within WSL2.
-- [Conda](https://docs.conda.io/en/latest/miniconda.html) or [Mamba](https://mamba.readthedocs.io) for environment management.
-- External simulation engines and quantum-chemistry tools (GROMACS, Gaussian, Multiwfn, XTB, Packmol) available in your runtime environment if you plan to execute the full workflows.
+Create the recommended environment:
 
-### Installation
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/HouGroup/PEMD.git
-   cd PEMD
-   ```
-2. **Create the recommended environment**
-   ```bash
-   conda env create -f environment.yml
-   conda activate pemd
-   ```
-3. **Install PEMD in editable mode**
-   ```bash
-   pip install -e .
-   ```
-   Editable installs make it easy to track custom modifications while leveraging the packaged entry points.
+```bash
+conda env create -f environment.yml
+conda activate pemd
+```
 
-### Quick Start
-Below is a minimal Python example that reproduces the molecular-dynamics pipeline shipped in `workflow/md.py`. It expects a PEMD-style JSON input (see [`workflow/md.json`](workflow/md.json)) describing the polymer chain, salts, and ion counts.
+Install PEMD in editable mode:
+
+```bash
+pip install -e .
+```
+
+For full workflow execution, make sure the required external programs are installed and available in `PATH`, depending on the calculation:
+
+- GROMACS
+- Packmol
+- Gaussian
+- XTB
+- Multiwfn
+
+## Quick Start
+
+The MD workflow uses a JSON file to describe the polymer, cation, and anion. See [workflow/md.json](workflow/md.json) for an example.
 
 ```python
 from pathlib import Path
 import shutil
 
-from PEMD.core.model import PEMDModel
 from PEMD.core.forcefields import Forcefield
+from PEMD.core.model import PEMDModel
 from PEMD.core.run import MDRun
 
-work_dir = Path("./demo_md")
+work_dir = Path("demo_md")
 work_dir.mkdir(exist_ok=True)
-
-# Copy the example JSON or replace it with your own specification
 shutil.copy("workflow/md.json", work_dir / "md.json")
+
 json_file = "md.json"
 
-# 1) Build polymer chains (short + long for charge fitting / production)
 pdb_short, pdb_long = PEMDModel.homopolymer_from_json(work_dir, json_file)
 
-# 2) Generate force-field files (LigParGen by default)
 Forcefield.oplsaa_from_json(
     work_dir,
     json_file,
@@ -97,7 +87,6 @@ Forcefield.oplsaa_from_json(
 Forcefield.oplsaa_from_json(work_dir, json_file, mol_type="Li_cation", ff_source="database")
 Forcefield.oplsaa_from_json(work_dir, json_file, mol_type="salt_anion", ff_source="database")
 
-# 3) Pack the amorphous simulation box and run MD
 PEMDModel.amorphous_cell_from_json(
     work_dir,
     json_file,
@@ -106,6 +95,7 @@ PEMDModel.amorphous_cell_from_json(
     packinp_name="pack.inp",
     packpdb_name="pack_cell.pdb",
 )
+
 MDRun.annealing_from_json(
     work_dir,
     json_file,
@@ -118,35 +108,37 @@ MDRun.annealing_from_json(
 MDRun.production_from_json(work_dir, json_file, temperature=298, nstep_ns=200)
 ```
 
-After the run completes, simulation outputs (topologies, trajectories, logs) reside under the working directory and can be analyzed with the `PEMD.analysis` modules.
+## Example Workflows
 
-## Workflows
-The `workflow/` directory provides end-to-end templates that can be executed directly or adapted to your project:
+The `workflow/` directory contains runnable examples:
 
-| Script | Purpose |
-| ------ | ------- |
-| `workflow/md.py` | Full MD pipeline: polymer build → force field → annealing → production.
-| `workflow/md_withRESP.py` | MD pipeline including RESP charge derivation from QM calculations.
-| `workflow/esw.py` | Compute electrochemical stability windows.
-| `workflow/frontier_orbitals.py` | Analyze frontier orbitals for small molecules or polymer fragments.
+| File | Description |
+| --- | --- |
+| [workflow/md.py](workflow/md.py) | Polymer construction, force-field generation, packing, annealing, and production MD |
+| [workflow/md_withRESP.py](workflow/md_withRESP.py) | MD workflow with RESP charge fitting |
+| [workflow/esw.py](workflow/esw.py) | Electrochemical stability window calculation |
+| [workflow/frontier_orbitals.py](workflow/frontier_orbitals.py) | HOMO/LUMO analysis from quantum-chemistry output |
 
-Each script assumes the presence of a PEMD-compatible JSON file (see `workflow/md.json`) and the necessary external executables in `PATH`. Treat them as well-documented starting points for your own automation.
+Each workflow expects a PEMD-style JSON input file and the external programs required for that calculation.
 
-## Analysis Toolkit
-Modules under `PEMD.analysis` implement commonly used observables for polymer electrolytes:
+## Analysis
 
-- `conductivity.py`, `transfer_number.py` – Ionic conductivity and transport number calculations.
-- `msd.py`, `polymer_ion_dynamics.py`, `residence_time.py` – Mean-squared displacement and ion residence time metrics.
-- `coordination.py`, `energy.py`, `tg.py` – Coordination statistics, energetic analyses, and glass-transition estimates.
+PEMD includes analysis tools for common polymer electrolyte properties:
 
-These utilities consume standard MD trajectories (e.g., XTC, DCD) and topology files. Consult in-code docstrings for details about expected input formats.
+- Mean squared displacement and self-diffusion coefficient
+- Ionic conductivity
+- Cation transfer number
+- Radial distribution function and coordination number
+- Residence time
+- Polymer-ion hopping dynamics
+- Glass-transition temperature
+- HOMO/LUMO energy and electrochemical stability window
 
-## Contact
-For questions, feature requests, or collaboration opportunities, please contact the PEMD development team at [tsd23@mails.tsinghua.edu.cn].
+Most trajectory analysis tools are exposed through `PEMD.core.analysis.PEMDAnalysis`.
 
 ## Citation
 
-If this work is helpful for your research, please cite our paper.
+If you use PEMD in published work, please cite:
 
 ```bibtex
 @article{tan2026pemd,
@@ -154,6 +146,10 @@ If this work is helpful for your research, please cite our paper.
   author  = {Tan, Shendong and Liang, Bochun and Lu, Dexin and Ji, Chaoyuan and Jia, Wenke and Li, Zihui and Hou, Tingzheng},
   journal = {Digital Discovery},
   year    = {2026},
-  DOI     = {10.1039/D5DD00454C},
+  DOI     = {10.1039/D5DD00454C}
 }
+```
 
+## Contact
+
+For questions or bug reports, contact the PEMD development team at <tsd23@mails.tsinghua.edu.cn>.
