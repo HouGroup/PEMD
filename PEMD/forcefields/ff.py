@@ -75,7 +75,32 @@ def get_oplsaa_xml(
     md_dir = work_path / "MD_dir"
     md_dir.mkdir(parents=True, exist_ok=True)
 
+    # untyped_str = pmd.load_file(pdb_file, structure=True)
     untyped_str = pmd.load_file(pdb_file, structure=True)
+
+    # RDKit生成的PDB包含完整CONECT，删除ParmEd按距离额外推断的键
+    conect_pairs = set()
+
+    for line in Path(pdb_file).read_text().splitlines():
+        if not line.startswith("CONECT"):
+            continue
+
+        fields = line.split()
+        atom_i = int(fields[1]) - 1
+
+        for value in fields[2:]:
+            atom_j = int(value) - 1
+            conect_pairs.add(tuple(sorted((atom_i, atom_j))))
+
+    # 对完整的单分子CONECT才执行，避免影响CONECT不完整的外部PDB
+    if len(conect_pairs) >= len(untyped_str.atoms) - 1:
+        for bond in list(untyped_str.bonds):
+            pair = tuple(sorted((bond.atom1.idx, bond.atom2.idx)))
+
+            if pair not in conect_pairs:
+                untyped_str.bonds.remove(bond)
+                bond.atom1.bonds.remove(bond)
+                bond.atom2.bonds.remove(bond)
 
     xml_path = work_path / f"{name}.xml"
     oplsaa = Forcefield(forcefield_files = xml_path)
