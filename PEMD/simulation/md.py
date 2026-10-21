@@ -253,11 +253,11 @@ def run_gmx_prod(
     gmx.gen_nvt_mdp_file(
         nsteps_nvt = nstep,
         filename = 'nvt_prod.mdp',
+        gen_seed=12345,
     )
 
     gmx.commands_nvt_product(
         input_gro = 'pre_eq.gro',
-        input_cpt = 'npt_eq.cpt',
         output_str = 'nvt_prod'
     ).run_local()
 

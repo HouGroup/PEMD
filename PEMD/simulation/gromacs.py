@@ -92,7 +92,7 @@ class PEMDGROMACS:
             file.write(file_contents)
         print(f"Minimization mdp file generation successful：{filename}\n")
 
-    def gen_nvt_mdp_file(self, nsteps_nvt = 200000, filename = 'nvt.mdp', ):
+    def gen_nvt_mdp_file(self, nsteps_nvt = 200000, filename = 'nvt.mdp', gen_seed=12345):
 
         filepath = os.path.join(self.work_dir, filename)
 
@@ -141,7 +141,9 @@ class PEMDGROMACS:
         file_contents += "ref_p                 = 1.0\n\n"
 
         file_contents += "; GENERATE VELOCITIES FOR STARTUP RUN\n"
-        file_contents += "gen_vel               = no\n\n"
+        file_contents += "gen_vel               = yes\n\n"
+        file_contents += f"gen_temp              = {self.temperature}\n"
+        file_contents += f"gen_seed              = {gen_seed}\n"
 
         file_contents += "; OPTIONS FOR BONDS\n"
         file_contents += "constraints           = hbonds\n"
@@ -443,16 +445,16 @@ class PEMDGROMACS:
             ]
         return self
 
-    def commands_nvt_product(self, input_gro, input_cpt, output_str, ):
+    def commands_nvt_product(self, input_gro, output_str, ):
 
         if self.gpu == True:
             self.commands = [
-                f"gmx grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -t {self.work_dir}/{input_cpt} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
+                f"gmx grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
                 f"gmx mdrun -v -deffnm {self.work_dir}/{output_str} -ntmpi 1 -ntomp 10",
             ]
         else:
             self.commands = [
-                f"gmx_mpi grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -t {self.work_dir}/{input_cpt} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
+                f"gmx_mpi grompp -f {self.work_dir}/{output_str}.mdp -c {self.work_dir}/{input_gro} -p {self.work_dir}/{self.top_filename} -o {self.work_dir}/{output_str}.tpr -maxwarn 1",
                 f"mpirun gmx_mpi mdrun -v -deffnm {self.work_dir}/{output_str}",
             ]
         return self
@@ -501,11 +503,11 @@ class PEMDGROMACS:
 
         if self.gpu == True:
             self.commands = [
-                f"echo 21 | gmx energy -f {self.work_dir}/{edr_file} -o {self.work_dir}/{output_file}"
+                f"printf 'Volume\\n0\\n' | gmx energy -f {self.work_dir}/{edr_file} -o {self.work_dir}/{output_file}"
             ]
         else:
             self.commands = [
-                f"echo 21 | gmx_mpi energy -f {self.work_dir}/{edr_file} -o {self.work_dir}/{output_file}"
+                f"printf 'Volume\\n0\\n' | gmx_mpi energy -f {self.work_dir}/{edr_file} -o {self.work_dir}/{output_file}"
             ]
         return self
 

@@ -489,8 +489,9 @@ def analyze_volume(volumes, start, dt_collection):
 
     start_time = int(start) / dt_collection
     average_volume = np.mean(volumes[int(start_time):])
-    closest_index = np.argmin(np.abs(volumes - average_volume))
-    return average_volume, closest_index
+    closest_index = np.argmin(np.abs(volumes[int(start_time):] - average_volume))
+    frame_time = start + closest_index * dt_collection
+    return average_volume, frame_time
 
 
 def extract_structure(partition, module_soft, tpr_file, xtc_file, save_gro_file, frame_time):
