@@ -587,6 +587,8 @@ class PEMDAnalysis:
         structure_code: int = 1,
         max_number: int = 100,
         write_freq: float = 0.01,
+        left_cap: str | None = None,
+        right_cap: str | None = None,
     ):
         lib.print_input("Extract Cluster Structures")
 
@@ -655,7 +657,9 @@ class PEMDAnalysis:
                     other_atom_idx,
                     start_atom,
                     end_atom,
-                    outxyz_file
+                    outxyz_file,
+                    left_cap=left_cap,
+                    right_cap=right_cap,
                 )
                 success += 1
 

@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from rdkit import Chem
 from tqdm.auto import tqdm
 from collections import deque
+from rdkit.Chem import AllChem
 from rdkit.Geometry import Point3D
 from MDAnalysis.analysis import rdf
 from matplotlib.colors import LogNorm
@@ -775,6 +776,169 @@ def find_poly_match_subindex(
     return best, pat_idx_start, pat_idx_end, mol_strict
 
 
+def append_custom_cap(
+    new_mol,
+    terminal_idx,
+    parent_mol,
+    parent_idx,
+    retained_indices,
+    cap_smiles,
+):
+    """Attach a cap with one '*' marker; return new atom coordinates."""
+
+    if not isinstance(cap_smiles, str) or not cap_smiles.strip():
+        raise ValueError("cap_smiles must be a nonempty SMILES.")
+
+    params = Chem.SmilesParserParams()
+    params.removeHs = False
+    cap = Chem.MolFromSmiles(cap_smiles, params)
+
+    if cap is None or len(Chem.GetMolFrags(cap)) != 1:
+        raise ValueError(f"Invalid or disconnected cap: {cap_smiles!r}")
+
+    dummies = [
+        atom for atom in cap.GetAtoms()
+        if atom.GetAtomicNum() == 0
+    ]
+
+    if len(dummies) != 1 or dummies[0].GetDegree() != 1:
+        raise ValueError(
+            "The cap must contain exactly one terminal '*' attachment marker."
+        )
+
+    dummy_atom = dummies[0]
+
+    if dummy_atom.GetBonds()[0].GetBondType() != Chem.BondType.SINGLE:
+        raise ValueError("Only single-bond cap attachments are supported.")
+
+    if any(atom.GetNumRadicalElectrons() for atom in cap.GetAtoms()):
+        raise ValueError("Radical caps are not supported.")
+
+    dummy_idx = dummy_atom.GetIdx()
+    attach_idx = dummy_atom.GetNeighbors()[0].GetIdx()
+
+    # Find the original bond cut during fragment extraction.
+    parent_atom = parent_mol.GetAtomWithIdx(parent_idx)
+    cut_bonds = [
+        bond for bond in parent_atom.GetBonds()
+        if bond.GetOtherAtomIdx(parent_idx) not in retained_indices
+    ]
+
+    if (
+        len(cut_bonds) != 1
+        or cut_bonds[0].GetBondType() != Chem.BondType.SINGLE
+    ):
+        raise ValueError(
+            "Each custom-capped endpoint must have exactly one cut single bond."
+        )
+
+    parent_conf = parent_mol.GetConformer()
+    terminal_pos = np.array(parent_conf.GetAtomPosition(parent_idx))
+
+    outside_idx = cut_bonds[0].GetOtherAtomIdx(parent_idx)
+    outside_pos = np.array(parent_conf.GetAtomPosition(outside_idx))
+
+    direction = outside_pos - terminal_pos
+    norm = np.linalg.norm(direction)
+
+    if norm < 1e-8:
+        raise ValueError("The original cut bond has zero length.")
+
+    direction /= norm
+
+    table = Chem.GetPeriodicTable()
+    bond_length = (
+        table.GetRcovalent(parent_atom.GetAtomicNum())
+        + table.GetRcovalent(
+            cap.GetAtomWithIdx(attach_idx).GetAtomicNum()
+        )
+    )
+
+    # Temporarily replace '*' with H to embed a closed molecule.
+    dummy_atom.SetAtomicNum(1)
+    dummy_atom.SetNoImplicit(True)
+    Chem.SanitizeMol(cap)
+
+    cap = Chem.AddHs(cap)
+
+    settings = AllChem.ETKDGv3()
+    settings.randomSeed = 42
+
+    if AllChem.EmbedMolecule(cap, settings) != 0:
+        raise ValueError(f"Cannot embed cap: {cap_smiles!r}")
+
+    if AllChem.UFFHasAllMoleculeParams(cap):
+        AllChem.UFFOptimizeMolecule(cap)
+
+    xyz = cap.GetConformer().GetPositions()
+
+    source = xyz[attach_idx] - xyz[dummy_idx]
+    source /= np.linalg.norm(source)
+
+    # Rotate the attachment direction onto the original cut bond.
+    cross = np.cross(source, direction)
+    cosine = float(np.clip(np.dot(source, direction), -1.0, 1.0))
+
+    if cosine < -1.0 + 1e-8:
+        axis = np.cross(
+            source,
+            np.eye(3)[np.argmin(np.abs(source))],
+        )
+        axis /= np.linalg.norm(axis)
+        rotation = 2.0 * np.outer(axis, axis) - np.eye(3)
+    else:
+        skew = np.array([
+            [0.0, -cross[2], cross[1]],
+            [cross[2], 0.0, -cross[0]],
+            [-cross[1], cross[0], 0.0],
+        ])
+        rotation = (
+            np.eye(3)
+            + skew
+            + skew @ skew / (1.0 + cosine)
+        )
+
+    xyz = (
+        (xyz - xyz[attach_idx]) @ rotation.T
+        + terminal_pos
+        + bond_length * direction
+    )
+
+    atom_map = {}
+    new_positions = {}
+
+    for atom in cap.GetAtoms():
+        old_idx = atom.GetIdx()
+
+        if old_idx == dummy_idx:
+            continue
+
+        copied_atom = Chem.Atom(atom)
+        copied_atom.SetNoImplicit(True)
+
+        new_idx = new_mol.AddAtom(copied_atom)
+        atom_map[old_idx] = new_idx
+        new_positions[new_idx] = xyz[old_idx]
+
+    for bond in cap.GetBonds():
+        begin = bond.GetBeginAtomIdx()
+        end = bond.GetEndAtomIdx()
+
+        if dummy_idx not in (begin, end):
+            new_mol.AddBond(
+                atom_map[begin],
+                atom_map[end],
+                bond.GetBondType(),
+            )
+
+    new_mol.AddBond(
+        terminal_idx,
+        atom_map[attach_idx],
+        Chem.BondType.SINGLE,
+    )
+
+    return new_positions
+
 def pick_most_central_match(matches, c_idx_list, selected_atom_idxs):
     best_match = None
     best_score = float("inf")
@@ -804,7 +968,9 @@ def pick_most_central_match(matches, c_idx_list, selected_atom_idxs):
     return best_match
 
 
-def get_cluster_withcap(work_dir, mol, match_list, center_atom_idx, other_atom_indices, start_atom, end_atom, out_xyz_filename):
+def get_cluster_withcap(work_dir, mol, match_list, center_atom_idx, other_atom_indices, start_atom, end_atom, out_xyz_filename, left_cap=None, right_cap=None,):
+
+    explicit_caps = left_cap is not None or right_cap is not None
 
     # 1. Normalize ``center_atom_idx`` to a list
     if isinstance(center_atom_idx, int):
@@ -837,7 +1003,10 @@ def get_cluster_withcap(work_dir, mol, match_list, center_atom_idx, other_atom_i
 
     for old_idx in select_atom_idx_with_h:
         atom = mol.GetAtomWithIdx(old_idx)
-        new_atom = Chem.Atom(atom.GetAtomicNum())
+        if explicit_caps:
+            new_atom = Chem.Atom(atom)
+        else:
+            new_atom = Chem.Atom(atom.GetAtomicNum())
         new_idx = new_mol.AddAtom(new_atom)
         index_map[old_idx] = new_idx
 
@@ -861,13 +1030,27 @@ def get_cluster_withcap(work_dir, mol, match_list, center_atom_idx, other_atom_i
 
     # Define the capping fragments to add
     capping_info = []
-    for terminal_idx in terminal_atoms:
+
+    for terminal_idx, cap_smiles in zip(
+            terminal_atoms, (left_cap, right_cap)
+    ):
         atom = new_mol.GetAtomWithIdx(terminal_idx)
-        h_count = sum(1 for nbr in atom.GetNeighbors() if nbr.GetAtomicNum() == 1)
-        if atom.GetAtomicNum() == 6 and h_count == 2:
-            capping_info.append({'type': 'H', 'atom_idx': terminal_idx})
+        h_count = sum(
+            nbr.GetAtomicNum() == 1 for nbr in atom.GetNeighbors()
+        )
+
+        if cap_smiles is not None:
+            cap_type = "custom"
+        elif atom.GetAtomicNum() == 6 and h_count == 2:
+            cap_type = "H"
         else:
-            capping_info.append({'type': 'CH3', 'atom_idx': terminal_idx})
+            cap_type = "CH3"
+
+        capping_info.append({
+            "type": cap_type,
+            "atom_idx": terminal_idx,
+            "smiles": cap_smiles,
+        })
 
     # Bond lengths in Ångström
     C_H_bond_length = 1.09
@@ -878,7 +1061,21 @@ def get_cluster_withcap(work_dir, mol, match_list, center_atom_idx, other_atom_i
     new_atom_positions = {}
 
     for cap in capping_info:
-        terminal_idx = cap['atom_idx']
+        terminal_idx = cap["atom_idx"]
+
+        if cap["type"] == "custom":
+            positions = append_custom_cap(
+                new_mol=new_mol,
+                terminal_idx=terminal_idx,
+                parent_mol=mol,
+                parent_idx=reverse_index_map[terminal_idx],
+                retained_indices=set(select_atom_idx_with_h),
+                cap_smiles=cap["smiles"],
+            )
+
+            new_atom_positions.update(positions)
+            continue
+
         terminal_atom = new_mol.GetAtomWithIdx(terminal_idx)
 
         # Look up the corresponding atom index in the original molecule
@@ -1037,6 +1234,16 @@ def get_cluster_withcap(work_dir, mol, match_list, center_atom_idx, other_atom_i
     # Chem.SanitizeMol(new_mol)
 
     # save to xyz file
+    if explicit_caps:
+        Chem.SanitizeMol(new_mol)
+
+        if any(
+                atom.GetNumRadicalElectrons()
+                for atom in new_mol.GetAtoms()
+        ):
+            raise ValueError(
+                "The capped cluster contains radicals or unsatisfied valences."
+            )
     out_xyz_filepath = os.path.join(work_dir, out_xyz_filename)
     Chem.MolToXYZFile(new_mol, out_xyz_filepath)
 
